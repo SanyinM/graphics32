@@ -290,6 +290,327 @@ begin
   end;
 end;
 
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+procedure MicroTilesUnion_SSE2(var DstTiles: TMicroTiles; const SrcTiles: TMicroTiles); {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$IFDEF TARGET_x86}
+  // [EAX] <- DstTile
+  // EDX <- SrcTile
+        PUSH      EBX
+        PUSH      ESI
+        PUSH      EDI
+      // ECX <- calculated width
+        MOV       ECX, [EDX].TMicroTiles.BoundsUsedTiles.Right
+        SUB       ECX, [EDX].TMicroTiles.BoundsUsedTiles.Left
+        INC       ECX
+        TEST      ECX, ECX
+        JLE       @Done
+
+        // EBX <- calculated height
+        MOV       EBX, [EDX].TMicroTiles.BoundsUsedTiles.Bottom
+        SUB       EBX, [EDX].TMicroTiles.BoundsUsedTiles.Top
+        INC       EBX
+        TEST      EBX, EBX
+        JLE       @Done
+
+        SUB       ESP, 16
+        MOV       [ESP + 0], ECX                // Width
+        MOV       [ESP + 4], EBX                // Height
+
+        // Src setup (ESI)
+        MOV       EBX, [EDX].TMicroTiles.BoundsUsedTiles.Top
+        IMUL      EBX, [EDX].TMicroTiles.Columns
+        ADD       EBX, [EDX].TMicroTiles.BoundsUsedTiles.Left
+        MOV       ESI, [EDX].TMicroTiles.Tiles
+        LEA       ESI, [ESI + EBX * 4]
+
+        // Dst setup (EDI)
+        MOV       EBX, [EDX].TMicroTiles.BoundsUsedTiles.Top
+        IMUL      EBX, [EAX].TMicroTiles.Columns
+        ADD       EBX, [EDX].TMicroTiles.BoundsUsedTiles.Left
+        MOV       EDI, [EAX].TMicroTiles.Tiles
+        LEA       EDI, [EDI + EBX * 4]
+
+        MOV       EBX, [EDX].TMicroTiles.Columns
+        SUB       EBX, ECX
+        SHL       EBX, 2
+        MOV       [ESP + 8], EBX
+
+        MOV       EBX, [EAX].TMicroTiles.Columns
+        SUB       EBX, ECX
+        SHL       EBX, 2
+        MOV       [ESP + 12], EBX
+
+        // Init masks
+        MOV       EAX, $0000FFFF
+        MOVD      XMM4, EAX
+        MOV       EAX, $FFFF0000
+        MOVD      XMM5, EAX
+
+@OuterLoop:
+        // Outer (row) loop (for Y...)
+        MOV       ECX, [ESP + 0]
+
+@InnerLoop:
+        // Inner loop (for X...)
+        PREFETCHNTA [ESI + 64]
+        PREFETCHNTA [EDI + 64]
+
+        MOV       EAX, [EDI]                    // EAX <- Dst tile
+        MOV       EDX, [ESI]                    // EDX <- Src tile
+        CMP       EAX, MICROTILE_FULL           // If Dst is FULL - skip
+        JE        @NextTile
+        CMP       EDX, MICROTILE_EMPTY          // If Src empty - skip
+        JE        @NextTile
+
+        MOV       EBX, EDX
+        SHR       EBX, 16
+        XOR       EBX, EDX
+        TEST      EBX, $0000FF00
+        JZ        @NextTile
+        TEST      EBX, $000000FF
+        JZ        @NextTile
+
+        // If Dst is empty or Src is full, assign Src
+        CMP       EAX, MICROTILE_EMPTY
+        JE        @Src
+        CMP       EDX, MICROTILE_FULL
+        JE        @Src
+
+        // Union
+        MOVD      XMM1, EAX
+        MOVD      XMM2, EDX
+        MOVDQA    XMM3, XMM2
+        PMINUB    XMM2, XMM1
+        PAND      XMM2, XMM5
+        PMAXUB    XMM1, XMM3
+        PAND      XMM1, XMM4
+        POR       XMM2, XMM1
+        MOVD      [EDI], XMM2
+        JMP       @NextTile
+
+@Src:
+        MOV       [EDI], EDX                    // Dst -> Src
+
+@NextTile:
+        // End of row, skip unused tiles
+        ADD       ESI, 4
+        ADD       EDI, 4
+        DEC       ECX
+        JNZ       @InnerLoop
+
+        ADD       ESI, [ESP + 8]
+        ADD       EDI, [ESP + 12]
+        DEC       DWORD PTR [ESP + 4]
+        JNZ       @OuterLoop
+
+        ADD       ESP, 16
+
+@Done:
+        POP       EDI
+        POP       ESI
+        POP       EBX
+{$ENDIF}
+{$IFDEF TARGET_x64}
+  // [RCX] <- DstTile
+  // EDX <- SrcTile
+        PUSH      RBX
+        PUSH      RSI
+        PUSH      RDI
+        PUSH      R12
+        // R8D <- calculated width
+        MOV       R8D, [RDX].TMicroTiles.BoundsUsedTiles.Right
+        SUB       R8D, [RDX].TMicroTiles.BoundsUsedTiles.Left
+        INC       R8D
+        TEST      R8D, R8D
+        JLE       @Exit
+
+        // EBX <- calculated height
+        MOV       R9D, [RDX].TMicroTiles.BoundsUsedTiles.Bottom
+        SUB       R9D, [RDX].TMicroTiles.BoundsUsedTiles.Top
+        INC       R9D
+        TEST      R9D, R9D
+        JLE       @Exit
+
+        // Src setup (RSI)
+        MOV       EBX, [RDX].TMicroTiles.BoundsUsedTiles.Top
+        IMUL      EBX, [RDX].TMicroTiles.Columns
+        ADD       EBX, [RDX].TMicroTiles.BoundsUsedTiles.Left
+        MOVSXD    RBX, EBX                      // Extend sign to 64-bit, for pointer arithmetic
+        MOV       RSI, [RDX].TMicroTiles.Tiles
+        LEA       RSI, [RSI + RBX * 4]
+        // Dst setup (RDI)
+        MOV       EBX, [RDX].TMicroTiles.BoundsUsedTiles.Top
+        IMUL      EBX, [RCX].TMicroTiles.Columns
+        ADD       EBX, [RDX].TMicroTiles.BoundsUsedTiles.Left
+        MOVSXD    RBX, EBX                      // Extend sign to 64-bit, for pointer arithmetic
+        MOV       RDI, [RCX].TMicroTiles.Tiles
+        LEA       RDI, [RDI + RBX * 4]
+        MOV       EBX, [RDX].TMicroTiles.Columns
+        SUB       EBX, R8D
+        SHL       EBX, 2
+        MOVSXD    R10, EBX
+        MOV       EBX, [RCX].TMicroTiles.Columns
+        SUB       EBX, R8D
+        SHL       EBX, 2
+        MOVSXD    R11, EBX
+        // Init masks
+        MOV       EAX, $0000FFFF
+        MOVD      XMM4, EAX
+        MOV       EAX, $FFFF0000
+        MOVD      XMM5, EAX
+
+@OuterLoop:
+        // Outer (row) loop (for Y...)
+        MOV       R12D, R8D
+
+@InnerLoop:
+        // Inner loop (for X...)
+        PREFETCHNTA [RSI + 64]
+        PREFETCHNTA [RDI + 64]
+        MOV       EAX, [RDI]                    // EAX <- Dst tile
+        MOV       EDX, [RSI]                    // EDX <- Src tile
+        CMP       EAX, MICROTILE_FULL           // If Dst is FULL - skip
+        JE        @NextTile
+        CMP       EDX, MICROTILE_EMPTY          // If Src empty - skip
+        JE        @NextTile
+
+        MOV       EBX, EDX
+        SHR       EBX, 16
+        XOR       EBX, EDX
+        TEST      EBX, $0000FF00
+        JZ        @NextTile
+
+        TEST      EBX, $000000FF
+        JZ        @NextTile
+
+        // If Dst is empty or Src is full, assign Src
+        CMP       EAX, MICROTILE_EMPTY
+        JE        @Src
+        CMP       EDX, MICROTILE_FULL
+        JE        @Src
+
+        // Union
+        MOVD      XMM1, EAX
+        MOVD      XMM2, EDX
+        MOVDQA    XMM3, XMM2
+        PMINUB    XMM2, XMM1
+        PAND      XMM2, XMM5
+        PMAXUB    XMM1, XMM3
+        PAND      XMM1, XMM4
+        POR       XMM2, XMM1
+        MOVD      [RDI], XMM2
+        JMP       @NextTile
+
+@Src:
+        MOV       [RDI], EDX                    // Dst -> Src
+
+@NextTile:
+        // End of row, skip unused tiles
+        ADD       RSI, 4
+        ADD       RDI, 4
+        DEC       R12D
+        JNZ     @InnerLoop
+
+        ADD       RSI, R10
+        ADD       RDI, R11
+        DEC       R9D
+        JNZ       @OuterLoop
+
+@Exit:
+        POP       R12
+        POP       RDI
+        POP       RSI
+        POP       RBX
+{$ENDIF}
+end;
+{$ifend}
+
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+procedure MicroTileUnion_SSE2(var DstTile: TMicroTile; const SrcTile: TMicroTile); {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$IFDEF TARGET_x86}
+  // [EAX] <- DstTile
+  // EDX <- SrcTile
+        MOV       ECX, [EAX]
+        CMP       ECX, MICROTILE_FULL
+        JE        @Done
+        CMP       EDX, MICROTILE_EMPTY
+        JE        @Done
+
+        MOV       ECX, EDX
+        SHR       ECX, 16
+        XOR       ECX, EDX
+        TEST      ECX, $0000FF00                // Check: Right and Left
+        JZ        @Done
+        TEST      ECX, $000000FF                // Check: Bottom and Top
+        JZ        @Done
+
+        MOV       ECX, [EAX]
+        CMP       ECX, MICROTILE_EMPTY
+        JE        @Src
+        CMP       EDX, MICROTILE_FULL
+        JE        @Src
+
+        MOVD      XMM1, EDX                     // XMM1 <- Src
+        MOVD      XMM2, ECX                     // XMM2 <- Dst
+        MOVAPS    XMM3, XMM1                    // XMM3 <- Src
+        MOV       ECX, $FFFF0000                // Mask (Left and Top)
+        MOVD      XMM0, ECX
+        PMINUB    XMM1, XMM2                    // XMM1 <- Min(Src, Dst)
+        PAND      XMM1, XMM0                    // Keep Left and Top min values
+        PSRLD     XMM0, 16                      // Mask shift -> $0000FFFF (for right and bottom)
+        PMAXUB    XMM2, XMM3                    // XMM2 <- Max(Dst, Src)
+        PAND      XMM2, XMM0                    // Keep Right and Bottom max values
+        POR       XMM1, XMM2                    // Merge min and max results
+        MOVD      [EAX], XMM1
+        JMP       @Done
+@Src:
+        MOV       [EAX], EDX                    // [EAX] <- Src
+@Done:
+{$ENDIF}
+{$IFDEF TARGET_x64}
+  // [RCX] <- DstTile
+  // EDX <- SrcTile
+        MOV       EAX, [RCX]
+        CMP       EAX, MICROTILE_FULL
+        JE        @Done
+        CMP       EDX, MICROTILE_EMPTY
+        JE        @Done
+
+        MOV       R8D, EDX
+        SHR       R8D, 16
+        XOR       R8D, EDX
+        TEST      R8D, $0000FF00                // Check: Right and Left
+        JZ        @Done
+        TEST      R8D, $000000FF                // Check: Bottom and Top
+        JZ        @Done
+
+        CMP       EAX, MICROTILE_EMPTY
+        JE        @Src
+        CMP       EDX, MICROTILE_FULL
+        JE        @Src
+
+        MOVD      XMM1, EDX                     // XMM1 <- Src
+        MOVD      XMM2, EAX                     // XMM2 <- Dst
+        MOVAPS    XMM3, XMM1                    // XMM3 <- Src
+        MOV       R8D, $FFFF0000                // Mask (Left and Top)
+        MOVD      XMM0, R8D
+        PMINUB    XMM1, XMM2                    // XMM1 <- Min(Src, Dst)
+        PAND      XMM1, XMM0                    // Keep Left and Top min values
+        PSRLD     XMM0, 16                      // Mask shift -> $0000FFFF (for right and bottom)
+        PMAXUB    XMM2, XMM3                    // XMM2 <- Max(Dst, Src)
+        PAND      XMM2, XMM0                    // Keep Right and Bottom max values
+        POR       XMM1, XMM2                    // Merge min and max results
+        MOVD      [RCX], XMM1
+        JMP       @Done
+@Src:
+        MOV       [RCX], EDX                    // [RCX] <- Src
+@Done:
+{$ENDIF}
+end;
+{$ifend}
+
 // TODO : rewrite MMX implementations using SSE
 {$if (not defined(PUREPASCAL)) and (not defined(OMIT_MMX)) and defined(TARGET_x86)}
 procedure MicroTileUnion_EMMX(var DstTile: TMicroTile; const SrcTile: TMicroTile);
@@ -1672,6 +1993,11 @@ begin
 {$if (not defined(PUREPASCAL)) and (not defined(OMIT_MMX)) and defined(TARGET_x86)}
   Registry[@@MicroTileUnion].Add(       @MicroTileUnion_EMMX,   [isExMMX]).Name := 'MicroTileUnion_EMMX';
   Registry[@@MicroTilesU].Add(          @MicroTilesUnion_EMMX,  [isExMMX]).Name := 'MicroTilesUnion_EMMX';
+{$ifend}
+
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+  Registry[@@MicroTileUnion].Add(       @MicroTileUnion_SSE2,   [isSSE2]).Name := 'MicroTileUnion_SSE2';
+  Registry[@@MicroTilesU].Add(          @MicroTilesUnion_SSE2,  [isSSE2]).Name := 'MicroTilesUnion_SSE2';
 {$ifend}
 
   Registry.RebindAll;
