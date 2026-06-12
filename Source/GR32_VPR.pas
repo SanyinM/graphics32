@@ -34,6 +34,9 @@ interface
 
 {$include GR32.inc}
 
+// Single loop for the entire scanline
+{$define INTEGRATE_SEG_SCANLINE}
+
 uses
   GR32;
 
@@ -180,7 +183,13 @@ type
   PScanLineArray = ^TScanLineArray;
   TScanLineArray = array [0..0] of TScanLine;
 
-procedure IntegrateSegment_SSE2(const P1, P2: TFloatPoint; Values: PSingleArray); {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+{$if defined(INTEGRATE_SEG_SCANLINE)}
+var
+  IntegrateSegmentScanline: procedure (Scanline: TScanline; Values: PSingleArray);
+{$ifend}
+
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+procedure IntegrateSegment_SSE2(const P1, P2: TFloatPoint; Values: PSingleArray); {$IFDEF FPC} assembler; {$IFDEF TARGET_X64}nostackframe;{$ENDIF} {$ENDIF}
 asm
 {$IFDEF TARGET_x86}
   // EAX <- P1
@@ -341,7 +350,7 @@ asm
         POP       ESI
         POP       EDI
 {$ENDIF TARGET_x86}
-{$IFDEF CPUX64}
+{$IFDEF TARGET_X64}
         SUB       RSP, 40
         MOVUPS    [RSP], XMM6
         MOVUPS    [RSP + 16], XMM7
@@ -490,6 +499,342 @@ asm
         ADD       RSP, 40
 {$ENDIF}
 end;
+{$ifend}
+
+{$if defined(INTEGRATE_SEG_SCANLINE) and (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+procedure IntegrateSegmentScanline_SSE2(ScanLine: TScanline; Values: PSingleArray); {$IFDEF FPC} assembler; {$IFDEF TARGET_X64}nostackframe;{$ENDIF} {$ENDIF}
+asm
+{$IFDEF TARGET_x86}
+  // EAX <- ScanLine
+  // ECX <- Count
+        PUSH EDI
+        PUSH ESI
+        MOV ECX, [EAX].TScanLine.Count
+        MOV EAX, [EAX].TScanLine.Segments
+        CMP EAX,0
+        JZ @Exit
+  // for each segment in Scanline
+@MainLoop:
+        MOVUPS    XMM0, DQWORD PTR [EAX].TScanLine.Segments // XMM0 <- P2.Y P2.X P1.Y P1.Y
+        CVTPS2DQ  XMM1, XMM0                    // XMM1 <- Rounded Y2 X2 Y1 X1
+        PSHUFD    XMM7 ,XMM1, $EE               // XMM7 <- Y2, X2, Y2, X2
+        MOVD      EDI, XMM7                     // ECX <- X2
+        MOVD      ESI, XMM1                     // EAX <- X1
+        CMP       EDI, ESI
+        JE        @Equals
+
+        CVTDQ2PS  XMM3, XMM1
+        MOVAPS    XMM2, XMM0
+        SUBPS     XMM2, XMM3                    // XMM2 <- [. fracX2 . fracX1]
+        PSHUFD    XMM3, XMM0, $EE
+        SUBPS     XMM3, XMM0                    // XMM3 <- [. . Dy Dx]
+        MOVAPS    XMM4, XMM3
+        PSHUFD    XMM3, XMM3, $55
+        DIVSS     XMM3, XMM4                    // XMM3 <- [. . . DyDx]
+        CMP       ESI, EDI
+        JG        @X1_Greater                   // if X1 < X2
+
+@X1_Smaller:                                    // X1 < X2
+        // Sx := 1 - fracX1;
+        MOVAPS    XMM4, DQWORD PTR [SSE_FloatOne_ALIGNED]
+        SUBPS     XMM4, XMM2                    // XMM4 <- [. . . Sx]
+        MOVAPS    XMM5, XMM4                    // Sx
+        // Y := P1.Y + Sx * DyDx;
+        MULPS     XMM4, XMM3                    // XMM4 <- [. . . Sx * DyDx]
+        PSHUFD    XMM6, XMM0, $55               // XMM6 <- P1.Y P1.Y P1.Y P1.Y
+        ADDPS     XMM4, XMM6                    // XMM4 <- [. . . Y]
+        // Values[X1] := Values[X1] + 0.5 * (P1.Y + Y) * Sx;
+        ADDPS     XMM6, XMM4                    // XMM6 <- (P1.Y + Y)
+        MULPS     XMM5, XMM6                    // XMM5 <- (P1.Y + Y) * Sx
+        MULPS     XMM5, DQWORD PTR [SSE_FloatHalf_ALIGNED] // XMM5 <- 0.5 * (P1.Y + Y) * Sx
+        MOVSS     XMM6, [EDX + ESI * 4]         // Offset to Values[X1]
+        ADDSS     XMM6, XMM5                    // XMM6 <- Values[X1] + 0.5 * (P1.Y + Y) * Sx
+        MOVSS     [EDX + ESI * 4], XMM6         // Values[X1] := XMM6
+        INC       ESI
+        DEC       EDI
+        CMP       EDI, ESI
+        JL        @Last1
+
+        MOVAPS    XMM6, XMM3                    // XMM6 <- DyDx
+        MULPS     XMM6, DQWORD PTR [SSE_FloatHalf_ALIGNED] // XMM6 <- dydx * 0.5
+
+@Loop1:
+        // Values[I] := Values[I] + (Y + DyDx * 0.5);
+        MOVAPS    XMM7, XMM6                    // XMM7 <- DyDx * 0.5
+        ADDPS     XMM7, XMM4                    // + Y
+        ADDSS     XMM7, [EDX + ESI * 4]         // + Values[I]
+        MOVSS     [EDX + ESI * 4], XMM7
+        ADDPS     XMM4, XMM3                    // Y := Y + DyDx;
+        INC       ESI
+        CMP       EDI, ESI
+        JGE       @Loop1
+
+@Last1:
+        // Sx := fracX2;
+        // Values[X2] := Values[X2] + 0.5 * (Y + P2.Y) * Sx;
+        SUB       ESI, 1
+        PSHUFD    XMM2, XMM2, $AA               // XMM2 <- frac2
+        PSHUFD    XMM0, XMM0, $FF
+        ADDPS     XMM0, XMM4
+        MULSS     XMM0, XMM2
+        ADD       EDI, 1
+        MULPS     XMM0, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        MOVSS     XMM6, [EDX + EDI * 4]
+        ADDPS     XMM6, XMM0
+        MOVSS     [EDX + EDI * 4], XMM6
+        JMP       @Done
+
+@X1_Greater:                                    // X1 > X2
+        MOVAPS    XMM4, XMM2                    // Sx, fracX1
+        // Sx := fracX1;
+        // Y := P1.Y - Sx * DyDx;
+        MULSS     XMM4, XMM3                    // XMM4 <- [. . . Sx * DyDx]
+        PSHUFD    XMM6, XMM0, $55               // XMM6 <- P1.Y P1.Y P1.Y P1.Y
+        MOVAPS    XMM5, XMM6                    // XMM5 <- P1.Y
+        SUBSS     XMM6, XMM4                    // XMM6 <- Y
+        // Values[X1] := Values[X1] - 0.5 * (P1.Y + Y) * Sx;
+        ADDSS     XMM5, XMM6                    // XMM6 <- (P1.Y + Y)
+        MULSS     XMM5, XMM2                    // XMM6 <- (P1.Y + Y) * Sx
+        MULPS     XMM5, DQWORD PTR [SSE_FloatHalf_ALIGNED] // XMM6 <- 0.5 * (P1.Y + Y) * Sx
+        MOVSS     XMM4, [EDX + ESI * 4]         // Offset to Values[X1]
+        SUBSS     XMM4, XMM5                    // XMM4 <- Values[X1] - 0.5 * (P1.Y + Y) * Sx
+        MOVSS     [EDX + ESI * 4], XMM4         // Values[X1] := XMM6
+        // for I := X1 - 1 downto X2 + 1 do
+        DEC       ESI
+        INC       EDI
+        CMP       ESI, EDI
+        JL        @Last2
+
+        MOVAPS    XMM4, XMM3                    // XMM4 <- DyDx
+        MULPS     XMM4, DQWORD PTR [SSE_FloatHalf_ALIGNED] // XMM4 <- DyDx * 0.5
+
+@Loop2:
+        // Values[I] := Values[I] - (Y - DyDx * 0.5);
+        MOVSS     XMM5, [EDX + ESI * 4]         // XMM5 <- Values[I]
+        SUBSS     XMM5, XMM6                    // - Y
+        ADDSS     XMM5, XMM4                    // + DyDx * 0.5 (Changed sign)
+        MOVSS     [EDX + ESI * 4], XMM5
+        // Y := Y - DyDx;
+        SUBPS     XMM6, XMM3
+        DEC       ESI
+        CMP       EDI, ESI
+        JLE       @Loop2
+
+@Last2:
+        // Sx := 1 - fracX2;
+        // Values[X2] := Values[X2] - 0.5 * (Y + P2.Y) * Sx;
+        PSHUFD    XMM3, XMM2, $AA               // XMM2 <- frac2
+        MOVAPS    XMM2, DQWORD PTR [SSE_FloatOne_ALIGNED]
+        SUBPS     XMM2, XMM3                    // XMM2 <- Sx
+        PSHUFD    XMM0, XMM0, $FF               // XMM0 <- P2.Y P2.Y P2.Y P2.Y
+        ADDPS     XMM0, XMM6
+        MULSS     XMM0, XMM2
+        MULPS     XMM0, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        MOVSS     XMM6, [EDX + ESI * 4]
+        SUBSS     XMM6, XMM0
+        MOVSS     [EDX + ESI * 4], XMM6
+        JMP       @Done
+
+(*
+@Equals:
+  // Values[X1] := Values[X1] + 0.5 * (P2.X - P1.X) * (P1.Y + P2.Y);
+  // XMM0 <- (P2.Y P2.X P1.Y P1.X)  * (1 1 1 -1) (XMM6)
+        XORPS     XMM0, DQWORD PTR [SSE_80000000_ALIGNED] // P1.X sign change: XMM0 <- (P2.Y P2.X P1.Y -P1.X)
+        PSHUFD    XMM1, XMM0, $EE               // XMM1 <- P2.Y P2.X P2.Y P2.X
+        ADDPS     XMM0, XMM1                    // Add
+        PSHUFD    XMM1, XMM0, $55               // XMM1 <- (P2.X - P1.X), (P1.Y + P2.Y), (P2.X - P1.X), (P1.Y + P2.Y)
+        MULPS     XMM0, XMM1
+        MULPS     XMM0, DQWORD PTR [SSE_FloatHalf_ALIGNED] // * 0.5
+        ADDSS     XMM0, [EDX + ESI * 4]
+        MOVSS     [EDX + ESI * 4], XMM0
+*)
+
+@Equals:
+        // XMM0 contains [Y2, X2, Y1, X1]
+        PSHUFD    XMM1, XMM0, $EE               // XMM1 = [Y2, X2, Y2, X2]
+        MOVAPS    XMM2, XMM1                    // XMM2 = [Y2, X2, Y2, X2]
+        SUBSS     XMM1, XMM0                    // XMM1[0] = X2 - X1
+        ADDPS     XMM0, XMM2                    // XMM0 = [Y2+Y2, X2+X2, Y1+Y2, X1+X2]
+        PSHUFD    XMM0, XMM0, $55               // XMM0 = [Y1+Y2, Y1+Y2, Y1+Y2, Y1+Y2]
+        MULSS     XMM0, XMM1                    // XMM0[0] = (Y1 + Y2) * (X2 - X1)
+        MULPS     XMM0, DQWORD PTR [SSE_FloatHalf_ALIGNED] // XMM0[0] = (Y1 + Y2) * (X2 - X1) * 0.5
+        ADDSS     XMM0, [EDX + ESI * 4]
+        MOVSS     [EDX + ESI * 4], XMM0
+
+@Done:
+        ADD       EAX, 16
+        SUB       ECX, 1
+        JNZ       @MainLoop
+
+@Exit:
+        POP       ESI
+        POP       EDI
+{$ENDIF TARGET_x86}
+{$IFDEF TARGET_X64}
+        SUB       RSP, 40
+        MOVUPS    [RSP], XMM6
+        MOVUPS    [RSP + 16], XMM7
+
+        MOV       R8, RDX                       // R8 <- Values
+        MOV       RAX, [RCX].TScanLine.Segments // RAX <- Pointer to segment
+        MOV       ECX, [RCX].TScanLine.Count    // ECX <- Count
+
+        TEST      RAX, RAX                      // Check if nil
+        JZ        @Exit
+        TEST      ECX, ECX                      // Check Count = 0
+        JLE       @Exit
+
+@MainLoop:
+        MOVUPS    XMM0, DQWORD PTR [RAX]        // XMM0 <- P2.Y P2.X P1.Y P1.X
+        CVTPS2DQ  XMM1, XMM0                    // XMM1 <- Rounded Y2 X2 Y1 X1
+        PSHUFD    XMM7, XMM1, $EE               // XMM7 <- Y2, X2, Y2, X2
+
+        MOVD      R11D, XMM7                    // R11D <- X2
+        MOVSXD    R11, R11D                     // R11 <- X2
+        MOVD      R10D, XMM1                    // R10D <- X1
+        MOVSXD    R10, R10D                     // R10 <- X1
+
+        CMP       R11, R10
+        JE        @Equals
+
+        CVTDQ2PS  XMM3, XMM1
+        MOVAPS    XMM2, XMM0
+        SUBPS     XMM2, XMM3                    // XMM2 <- [. fracX2 . fracX1]
+        PSHUFD    XMM3, XMM0, $EE
+        SUBPS     XMM3, XMM0                    // XMM3 <- [. . Dy Dx]
+        MOVAPS    XMM4, XMM3
+        PSHUFD    XMM3, XMM3, $55
+        DIVSS     XMM3, XMM4                    // XMM3[0] = DyDx
+        CMP       R10, R11
+        JG        @X1_Greater                   // if X1 < X2
+
+@X1_Smaller:                                    // X1 < X2
+        // Sx := 1 - fracX1;
+        MOVAPS    XMM4, DQWORD PTR [SSE_FloatOne_ALIGNED]
+        SUBPS     XMM4, XMM2                    // XMM4 <- [. . . Sx]
+        MOVAPS    XMM5, XMM4                    // Sx
+        // Y := P1.Y + Sx * DyDx;
+        MULPS     XMM4, XMM3                    // XMM4 <- [. . . Sx * DyDx]
+        PSHUFD    XMM6, XMM0, $55               // XMM6 <- P1.Y P1.Y P1.Y P1.Y
+        ADDPS     XMM4, XMM6                    // XMM4 <- [. . . Y]
+        // Values[X1] := Values[X1] + 0.5 * (P1.Y + Y) * Sx;
+        ADDPS     XMM6, XMM4                    // XMM6 <- (P1.Y + Y)
+        MULPS     XMM5, XMM6                    // XMM5 <- (P1.Y + Y) * Sx
+        MOVAPS    XMM6, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        MULPS     XMM5, XMM6
+        MOVSS     XMM7, [R8 + R10 * 4]          // Offset to Values[X1]
+        ADDSS     XMM7, XMM5                    // XMM6 <- Values[X1] + 0.5 * (P1.Y + Y) * Sx
+        MOVSS     [R8 + R10 * 4], XMM7          // Values[X1] := XMM6
+        INC       R10
+        DEC       R11
+        CMP       R11, R10
+        JL        @Last1
+        MOVAPS    XMM7, XMM3                    // XMM6 <- DyDx
+        MULPS     XMM7, XMM6                    // XMM7 <- dydx * 0.5
+
+@Loop1:
+        // Values[I] := Values[I] + (Y + DyDx * 0.5);
+        MOVAPS    XMM5, XMM7                    // XMM7 <- DyDx * 0.5
+        ADDPS     XMM5, XMM4                    // + Y
+        ADDSS     XMM5, [R8 + R10 * 4]          // + Values[I]
+        MOVSS     [R8 + R10 * 4], XMM5
+        ADDPS     XMM4, XMM3                    // Y := Y + DyDx;
+        INC       R10
+        CMP       R11, R10
+        JGE       @Loop1
+
+@Last1:
+        // Sx := fracX2;
+        // Values[X2] := Values[X2] + 0.5 * (Y + P2.Y) * Sx;
+        DEC       R10
+        PSHUFD    XMM2, XMM2, $AA               // XMM2 <- frac2
+        PSHUFD    XMM0, XMM0, $FF
+        ADDPS     XMM0, XMM4
+        MULSS     XMM0, XMM2
+        MULPS     XMM0, XMM6
+        INC       R11
+        MOVSS     XMM5, [R8 + R11 * 4]
+        ADDPS     XMM5, XMM0
+        MOVSS     [R8 + R11 * 4], XMM5
+        JMP       @Done
+
+@X1_Greater:                                    // X1 > X2
+        MOVAPS    XMM4, XMM2                    // sx, fracX1
+        // Sx := fracX1;
+        // Y := P1.Y - Sx * DyDx;
+        MULSS     XMM4, XMM3                    // XMM4 <- [. . . Sx * DyDx]
+        PSHUFD    XMM5, XMM0, $55               // XMM6 <- P1.Y P1.Y P1.Y P1.Y
+        MOVAPS    XMM6, XMM5                    // XMM5 <- P1.Y
+        SUBSS     XMM6, XMM4                    // XMM6 <- Y
+        // Values[X1] := Values[X1] - 0.5 * (P1.Y + Y) * Sx;
+        ADDSS     XMM5, XMM6                    // XMM6 <- (P1.Y + Y)
+        MULSS     XMM5, XMM2                    // XMM6 <- (P1.Y + Y) * Sx
+        MOVAPS    XMM4, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        MULPS     XMM5, XMM4                    // XMM6 <- 0.5 * (P1.Y + Y) * Sx
+        MOVSS     XMM7, [R8 + R10 * 4]          // Offset to Values[X1]
+        SUBSS     XMM7, XMM5                    // XMM4 <- Values[X1] - 0.5 * (P1.Y + Y) * Sx
+        MOVSS     [R8 + R10 * 4], XMM7          // Values[X1] := XMM6
+        // for I := X1 - 1 downto X2 + 1 do
+        DEC       R10
+        INC       R11
+        CMP       R10, R11
+        JL        @Last2
+
+        MOVAPS    XMM5, XMM3                    // XMM4 <- DyDx
+        MULPS     XMM5, XMM4                    // XMM4 <- DyDx * 0.5
+
+@Loop2:
+        // Values[I] := Values[I] - (Y - DyDx * 0.5);
+        MOVSS     XMM7, [R8 + R10 * 4]          // XMM5 <- Values[I]
+        SUBSS     XMM7, XMM6                    // - Y
+        ADDSS     XMM7, XMM5                    // + DyDx * 0.5 (Changed sign)
+        MOVSS     [R8 + R10 * 4], XMM7
+        SUBPS     XMM6, XMM3
+        DEC       R10
+        CMP       R11, R10
+        JLE       @Loop2
+
+@Last2:
+        // Sx := 1 - fracX2;
+        // Values[X2] := Values[X2] - 0.5 * (Y + P2.Y) * Sx;
+        PSHUFD    XMM3, XMM2, $AA
+        MOVAPS    XMM2, DQWORD PTR [SSE_FloatOne_ALIGNED]
+        SUBPS     XMM2, XMM3                    // XMM2 <- 1 - Sx
+        PSHUFD    XMM0, XMM0, $FF               // XMM0 <- P2.Y P2.Y P2.Y P2.Y
+        ADDPS     XMM0, XMM6
+        MULSS     XMM0, XMM2
+        MULPS     XMM0, XMM4
+        MOVSS     XMM7, [R8 + R10 * 4]
+        SUBSS     XMM7, XMM0
+        MOVSS     [R8 + R10 * 4], XMM7
+        JMP       @Done
+
+@Equals:
+        // Values[X1] := Values[X1] + 0.5 * (P2.X - P1.X) * (P1.Y + P2.Y);
+        // XMM0 <- (P2.Y P2.X P1.Y P1.X)  * (1 1 1 -1) (XMM6)
+        PSHUFD    XMM1, XMM0, $EE               // XMM1 <- P2.Y P2.X P2.Y P2.X
+        MOVAPS    XMM2, XMM1                    // Add
+        SUBSS     XMM1, XMM0                    // XMM1 <- (P2.X - P1.X), (P1.Y + P2.Y), (P2.X - P1.X), (P1.Y + P2.Y)
+        ADDPS     XMM0, XMM2
+        PSHUFD    XMM0, XMM0, $55
+        MULSS     XMM0, XMM1                    // * 0.5
+        MOVAPS    XMM4, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        MULSS     XMM0, XMM4
+        ADDSS     XMM0, [R8 + R10 * 4]
+        MOVSS     [R8 + R10 * 4], XMM0
+
+@Done:
+        ADD       RAX, 16                       // Move to next segment
+        SUB       ECX, 1                        // Dec Count
+        JNZ       @MainLoop
+
+@Exit:
+        MOVUPS    XMM6, [RSP]
+        MOVUPS    XMM7, [RSP + 16]
+        ADD       RSP, 40
+{$ENDIF}
+end;
+{$ifend}
 
 procedure IntegrateSegment_Pas(const P1, P2: TFloatPoint; Values: PSingleArray);
 var
@@ -615,6 +960,141 @@ begin
   end;
 end;
 
+{$if defined(INTEGRATE_SEG_SCANLINE)}
+procedure IntegrateSegmentScanline_Pas(ScanLine: TScanLine; Values: PSingleArray);
+var
+{$if defined(NEGATIVE_INDEX_64) }
+  X1, X2: Int64;
+{$else}
+  X1, X2: Integer;
+{$ifend}
+  i, j: Integer;
+  Dx, Dy, DyDx, Y: TFloat;
+  fracX1, fracX2: TFloat;
+  P1, P2: TFloatPoint;
+  Segment: PLineSegment;
+const
+  HalfFloat: TFloat = 0.5;
+begin
+  (*
+  ** We have a line segment going from (X1,Y1) to (X2,Y2):
+  **
+  **        X1     X2
+  **       +---------
+  **    Y1 | *
+  **       |  *
+  **       |   *
+  **       |    *
+  **       |     *
+  **       |      *
+  **    Y2 |       *
+  **
+  ** The Y values in the segment belongs to a single scanline so the line segment is 1 pixel high.
+  ** Additionally, we know that the Y values are in the range [0..1].
+  ** In the example below, we have a segment where X2-X1=6. Each box is a pixel.
+  **
+  **        X1                       X2
+  **       +---+---+---+---+---+---+---+
+  **    Y1 | * |   |   |   |   |   |   |
+  **       |   | * |   |   |   |   |   |
+  **       |   |   | * |   |   |   |   |
+  **       |   |   |   | * |   |   |   |
+  **       |   |   |   |   | * |   |   |
+  **       |   |   |   |   |   | * |   |
+  **    Y2 |   |   |   |   |   |   | * |
+  **       +---+---+---+---+---+---+---+
+  **
+  ** For each X, we need to calculate the area below (or above) the line segment.
+  ** We do this by calculating the slope of the line, and from that we can find the Y value
+  ** given an X value.
+  ** Once we have an X and an Y value we calculate the area as X*Y/2.
+  **
+  **        X1                       X2
+  **       +---+---+---+---+---+---+---+
+  **    Y1 | * |   |   |   |   |   |   |
+  **       | * | * |   |   |   |   |   |
+  **       | * | * | * |   |   |   |   |
+  **       | * | * | * | * |   |   |   |
+  **       | * | * | * | * | * |   |   |
+  **       | * | * | * | * | * | * |   |
+  **    Y2 | * | * | * | * | * | * | * |
+  **       +---+---+---+---+---+---+---+
+  **
+  *)
+
+  for j := 0 to ScanLine.Count - 1 do
+  begin
+    Segment := @ScanLine.Segments[j];
+
+    P1 := Segment[0];
+    P2 := Segment[1];
+
+    X1 := PolyFloor(P1.X);
+    X2 := PolyFloor(P2.X);
+
+    // Vertical segment (within one pixel)
+    if X1 = X2 then
+    begin
+
+      Values[X1] := Values[X1] + HalfFloat * (P2.X - P1.X) * (P1.Y + P2.Y);
+
+    end else
+    // Everything else
+    begin
+
+      Dx := P2.X - P1.X;
+      Dy := P2.Y - P1.Y;
+      DyDx := Dy/Dx; // For each X, how much does Y increment
+
+      if X1 < X2 then
+      begin
+
+        fracX1 := 1 - (P1.X - X1);
+        fracX2 := P2.X - X2;
+
+        Y := P1.Y + fracX1 * DyDx;
+
+        // First fractional X (fracX1..1)
+        Values[X1] := Values[X1] + HalfFloat * (P1.Y + Y) * fracX1;
+
+        // Whole Xs (1..1)
+        for i := X1 + 1 to X2 - 1 do
+        begin
+          Values[i] := Values[i] + (Y + DyDx * HalfFloat);     // N: Sx = 1
+          Y := Y + DyDx;
+        end;
+
+        // Last fractional X (1..fracX2)
+        Values[X2] := Values[X2] + HalfFloat * (Y + P2.Y) * fracX2;
+
+      end else // X1 > X2
+      begin
+
+        fracX1 := P1.X - X1;
+        fracX2 := 1 - (P2.X - X2);
+
+        Y := P1.Y - fracX1 * DyDx;
+
+        // First fractional X (fracX1..1)
+        Values[X1] := Values[X1] - HalfFloat * (P1.Y + Y) * fracX1;
+
+        // Whole Xs (1..1)
+        for i := X1 - 1 downto X2 + 1 do
+        begin
+          Values[i] := Values[i] - (Y - DyDx * HalfFloat);    // N: Sx = -1
+          Y := Y - DyDx;
+        end;
+
+        // Last fractional X (1..fracX2)
+        Values[X2] := Values[X2] - HalfFloat * (Y + P2.Y) * fracX2;
+
+      end;
+
+    end;
+  end;
+end;
+{$ifend}
+
 procedure ExtractSingleSpan(const ScanLine: TScanLine; out Span: TValueSpan; SpanData: PSingleArray);
 var
   i: Integer;
@@ -713,11 +1193,15 @@ begin
   (*
   ** (d) integrate each line segment and accumulate span buffer.
   *)
+{$if defined(INTEGRATE_SEG_SCANLINE)}
+  IntegrateSegmentScanline(ScanLine, SpanData);
+{$else}
   for i := 0 to ScanLine.Count - 1 do
   begin
     Segment := @ScanLine.Segments[i];
     IntegrateSegment(Segment[0], Segment[1], SpanData);
   end;
+{$ifend}
 end;
 
 procedure AddSegment(const X1, Y1, X2, Y2: TFloat; var ScanLine: TScanLine);// {$IFDEF USEINLINING} inline; {$ENDIF}
@@ -1094,13 +1578,20 @@ procedure RegisterBindings;
 begin
 
   Registry := NewRegistry('GR32_VPRs bindings');
+
+{$if defined(INTEGRATE_SEG_SCANLINE)}
+  Registry.RegisterBinding(@@IntegrateSegmentScanline, 'IntegrateSegmentScanline');
+  Registry[@@IntegrateSegmentScanline].Add( @IntegrateSegmentScanline_Pas,  [isPascal]).Name := 'IntegrateSegmentScanline_Pas';
+  {$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+  Registry[@@IntegrateSegmentScanline].Add( @IntegrateSegmentScanline_SSE2, [isSSE2]).Name :=   'IntegrateSegmentScanline_SSE2';
+  {$ifend}
+{$else}
   Registry.RegisterBinding(@@IntegrateSegment, 'IntegrateSergment');
-
-  Registry[@@IntegrateSegment].Add(   @IntegrateSegment_Pas,       [isPascal]).Name := 'IntegrateSegment_Pas';
-{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
-  Registry[@@IntegrateSegment].Add(   @IntegrateSegment_SSE2,       [isSSE2]).Name := 'IntegrateSegment_SSE2';
+  Registry[@@IntegrateSegment].Add(         @IntegrateSegment_Pas,          [isPascal]).Name := 'IntegrateSegment_Pas';
+  {$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+  Registry[@@IntegrateSegment].Add(         @IntegrateSegment_SSE2,         [isSSE2]).Name :=   'IntegrateSegment_SSE2';
+  {$ifend}
 {$ifend}
-
   Registry.RebindAll;
 end;
 
