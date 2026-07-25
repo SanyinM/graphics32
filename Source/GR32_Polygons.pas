@@ -37,6 +37,7 @@ interface
 uses
 {$if not defined(FPC)}
   System.Types,
+  System.SysUtils,
 {$else}
   Types,
 {$ifend}
@@ -128,9 +129,46 @@ type
 
 //------------------------------------------------------------------------------
 //
+//      LCD sub-pixel rendering
+//
+//------------------------------------------------------------------------------
+// References:
+// - https://en.wikipedia.org/wiki/Subpixel_rendering
+// - https://www.grc.com/cleartype.htm
+// - https://en.wikipedia.org/wiki/ClearType
+// - https://en.wikipedia.org/wiki/CoolType
+//------------------------------------------------------------------------------
+
+type
+{$if not defined(FPC)}
+  PByteArray = System.SysUtils.PByteArray;
+{$else}
+  PByteArray = SysUtils.PByteArray;
+{$ifend}
+
+type
+  TRGBTriple = packed record
+    B, G, R: Byte;
+  end;
+
+  PRGBTripleArray = ^TRGBTripleArray;
+  TRGBTripleArray = array [0..0] of TRGBTriple;
+
+  TMakeAlphaProcLCD = procedure(Coverage: PSingleArray; AlphaValues: PByteArray; Count: Integer; Color: TColor32);
+
+var
+  // Coverage builders used internally by TPolygonRenderer32LCD and TPolygonRenderer32LCD2
+  MakeAlphaEvenOddLCD: TMakeAlphaProcLCD;
+  MakeAlphaNonZeroLCD: TMakeAlphaProcLCD;
+  MakeAlphaEvenOddLCD2: TMakeAlphaProcLCD;
+  MakeAlphaNonZeroLCD2: TMakeAlphaProcLCD;
+
+//------------------------------------------------------------------------------
+//
 //      TPolygonRenderer32
 //
 //------------------------------------------------------------------------------
+type
   TCustomPolygonFiller = class;
 
   TPolygonRenderer32 = class abstract(TCustomPolygonRenderer)
@@ -194,11 +232,15 @@ type
       const ClipRect: TFloatRect); override;
   end;
 
+
 //------------------------------------------------------------------------------
 // TPolygonRenderer32LCD
 //------------------------------------------------------------------------------
   TPolygonRenderer32LCD = class(TPolygonRenderer32VPR)
+  private
+    MakeAlpha: array [TPolyFillMode] of TMakeAlphaProcLCD;
   protected
+    procedure UpdateMakeAlphaProc; virtual;
     procedure RenderSpan(const Span: TValueSpan; DstY: Integer); override;
   public
     procedure PolyPolygonFS(const Points: TArrayOfArrayOfFloatPoint;
@@ -209,6 +251,8 @@ type
 // TPolygonRenderer32LCD2
 //------------------------------------------------------------------------------
   TPolygonRenderer32LCD2 = class(TPolygonRenderer32LCD)
+  protected
+    procedure UpdateMakeAlphaProc; override;
   public
     procedure RenderSpan(const Span: TValueSpan; DstY: Integer); override;
   end;
@@ -541,7 +585,6 @@ implementation
 uses
 {$if not defined(FPC)}
   System.Math,
-  System.SysUtils,
 {$else}
   Math,
   SysUtils,
@@ -927,6 +970,551 @@ begin
   end;
 end;
 
+//------------------------------------------------------------------------------
+// MakeAlphaNonZeroLCD_SSE2
+//------------------------------------------------------------------------------
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+
+procedure MakeAlphaNonZeroLCD_SSE2(Coverage: PSingleArray; AlphaValues: PByteArray; Count: integer; Color: TColor32);
+  // EAX=Coverage
+  // EDX=AlphaValues
+  // ECX=Count
+{$if defined(TARGET_x64) and defined(FPC)}begin{$ifend}
+asm
+{$if defined(TARGET_x86)}
+        PUSH        EBX
+        PUSH        EDI                 // Counter for sum
+        PUSH        ESI
+
+        MOV         ESI, EDX
+        ADD         ESI, Count
+        MOV         EDI, 0
+        MOV         EBX,[EBP + $8]      // Color
+        PUSH        EAX
+        PUSH        EDX
+        MOV         EDX, EBX
+        SHR         EDX, 24
+        MOV         EAX, 86             // LCD
+        MUL         EDX
+        MOVD        XMM5, EAX
+        PSHUFD      XMM5, XMM5, $44     // M
+// load constants
+{$if (not defined(FPC))}
+        MOVUPS      XMM6, DQWORD PTR [SSE_10000_FLOAT_ALIGNED]
+        MOVUPS      XMM7, DQWORD PTR [SSE_10000_ALIGNED]
+{$else}
+        MOVUPS      XMM6, DQWORD PTR [rip+SSE_10000_FLOAT_ALIGNED]
+        MOVUPS      XMM7, DQWORD PTR [rip+SSE_10000_ALIGNED]
+{$ifend}
+        POP         EDX
+        POP         EAX
+        PCMPEQD     XMM4, XMM4          // for abs
+        PSRLD       XMM4, 1
+        PXOR        XMM1, XMM1          // set to zero
+        MOV         BYTE PTR[EDX], 0    // set forst two bytes to 0
+        MOV         BYTE PTR[EDX + 1], 0
+        MOV         EBX,ECX
+        AND         EBX, 3              // remainder
+        SAR         ECX, 2              // div with 4 to get cnt
+        JNZ         @LOOP
+        CMP         EBX, 4
+        JL          @REMAINDER
+        JMP         @END
+
+@LOOP:
+        MOVDQU      XMM0, [EAX]         // coverage
+        MULPS       XMM0, XMM6 // multiply by 65536
+        PCMPEQD     XMM4, XMM4          // for abs
+        PSRLD       XMM4, 1             // for abs
+        ANDPS       XMM0, XMM4          // abs
+        CVTPS2DQ    XMM0, XMM0          // convert to int
+{
+        PMINSD XMM0, DQWORD PTR [SSE_10000_ALIGNED]            // SSE41
+}
+        MOVDQA      XMM3, XMM7
+        PCMPGTD     XMM3, XMM0
+        PAND        XMM0, XMM3
+        PANDN       XMM3, XMM7
+        POR         XMM0, XMM3
+
+        PSHUFD      XMM4, XMM0, $FA     // d c b a -> 0 b 0 a
+        PSHUFD      XMM0, XMM0, $50     // d c b a -> 0 d 0 c
+        PMULUDQ     XMM0, XMM5          // b b a a
+        PMULUDQ     XMM4, XMM5          // d d c c
+        PSHUFD      XMM0, XMM0, $88     // b a b a
+        PSHUFD      XMM4, XMM4, $88     // d c d c
+        PUNPCKLQDQ  XMM0, XMM4          // d c b a
+
+        PSRLD       XMM0, 24            // convert to words
+        PACKSSDW    XMM0, XMM0          // to words   // sse2
+        PUNPCKLQDQ  XMM1, XMM0          // old:new, 4:4 words
+        PSRLDQ      XMM1, 4             // shift 2 right words
+        PADDW       XMM0, XMM1          // sum
+        PSRLDQ      XMM1, 2             // shift right 2 words
+        PADDW       XMM0, XMM1          // sum
+        PSRLDQ      XMM1, 2
+        PACKUSWB    XMM0, XMM0          // to bytes
+        MOVD        [EDX], XMM0
+        ADD         EAX, 16
+        ADD         EDX, 4
+        SUB         ECX, 1
+        JNZ         @LOOP
+
+        PACKUSWB    XMM1, XMM1          // to bytes -  XMM1 contains remainder, two more left
+        PSRLDQ      XMM1, 2
+        MOVD        ECX, XMM1
+        MOV         BYTE PTR[EDX], CL
+        PSRLDQ      XMM1, 1
+        MOVD        ECX, XMM1
+        MOV         BYTE PTR[EDX + 1], CL
+        ADD         BYTE PTR[EDX], CL
+
+@REMAINDER:
+        CMP         EBX, 0
+        JZ          @ENDLOOP
+        MOV         ECX, EBX
+
+@LOOP2:
+        MOVD XMM0,  [EAX]               // coverage
+        MULPS XMM0, XMM6                // multiply by 65536
+        PCMPEQD     XMM4, XMM4          // for abs
+        PSRLD       XMM4, 1             // for abs
+        ANDPS       XMM0, XMM4          // abs
+        CVTPS2DQ    XMM0, XMM0          // convert to int
+        MOVDQA      XMM3, XMM7
+        PCMPGTD     XMM3, XMM0
+        PAND        XMM0, XMM3
+        PANDN       XMM3, XMM7
+        POR         XMM0, XMM3
+        PMULUDQ     XMM0, XMM5          // b b a a
+        PSRLDQ      XMM0, 3             // right shift 2 words
+        MOVD        EBX, XMM0
+        ADD         BYTE PTR[EDX], BL
+        ADD         BYTE PTR[EDX + 1], BL
+        MOV         BYTE PTR[EDX + 2], BL
+        ADD         EAX, 4
+        ADD         EDX, 1
+        SUB         ECX, 1
+        JNZ         @LOOP2
+
+@ENDLOOP:
+        MOV         BYTE PTR[ESI + 2], 0
+        MOV         BYTE PTR[ESI + 3], 0
+
+@END:
+        POP         ESI
+        POP         EDI
+        POP         EBX
+
+{$elseif defined(TARGET_x64)}
+
+  // RCX = Coverage (pointer)
+  // RDX = AlphaValues (pointer)
+  // R8d = Count
+  // R9d = Color
+
+{$IFNDEF FPC}
+  .SAVENV XMM4
+  .SAVENV XMM5
+  .SAVENV XMM6
+  .SAVENV XMM7
+{$ENDIF}
+
+        PUSH        RBX
+        PUSH        RDI
+        PUSH        RSI
+
+        MOV         RAX, RCX
+        MOV         ECX, R8D            // ECX <- Count (32-bit)
+        MOV         EBX, R9D            // EBX <- Color
+        MOV         RSI, RDX            // RSI <- AlphaValues
+        MOV         R11D, ECX           // Copy Count to r11d
+        ADD         RSI, R11            // RSI <- AlphaValues + Count
+        XOR         RDI, RDI            // EDI <- 0
+
+// Color  - Alpha channel * 86
+        MOV         R10D, EBX
+        SHR         R10D, 24
+        IMUL        R10D, R10D, 86
+        MOVD        XMM5, R10D
+        PSHUFD      XMM5, XMM5, $44
+// Load constants
+{$if (not defined(FPC))}
+        MOVUPS      XMM6, DQWORD PTR [SSE_10000_FLOAT_ALIGNED]
+        MOVUPS      XMM7, DQWORD PTR [SSE_10000_ALIGNED]
+{$else}
+        MOVUPS      XMM6, DQWORD PTR [rip+SSE_10000_FLOAT_ALIGNED]
+        MOVUPS      XMM7, DQWORD PTR [rip+SSE_10000_ALIGNED]
+{$ifend}
+        PCMPEQD     XMM4, XMM4
+        PSRLD       XMM4, 1
+        PXOR        XMM1, XMM1
+        MOV         BYTE PTR[RDX], 0
+        MOV         BYTE PTR[RDX + 1], 0
+        MOV         R11D, ECX
+        AND         R11D, 3        // r11d = remainder
+        SAR         ECX, 2         // ECX <= Count div 4
+        JNZ         @LOOP
+
+        CMP         R11D, 4
+        JL          @REMAINDER
+        JMP         @END
+
+@LOOP:
+        MOVDQU      XMM0, [RAX] // coverage
+        MULPS       XMM0, XMM6 // multiply by 65536
+        PCMPEQD     XMM4, XMM4
+        PSRLD       XMM4, 1
+        ANDPS       XMM0, XMM4
+        CVTPS2DQ    XMM0, XMM0
+{
+        PMINSD XMM0, DQWORD PTR [SSE_10000_ALIGNED]            // SSE41
+}
+        MOVDQA      XMM3, XMM7
+        PCMPGTD     XMM3, XMM0
+        PAND        XMM0, XMM3
+        PANDN       XMM3, XMM7
+        POR         XMM0, XMM3
+
+        PSHUFD      XMM4, XMM0, $FA
+        PSHUFD      XMM0, XMM0, $50
+        PMULUDQ     XMM0, XMM5
+        PMULUDQ     XMM4, XMM5
+        PSHUFD      XMM0, XMM0, $88
+        PSHUFD      XMM4, XMM4, $88
+        PUNPCKLQDQ  XMM0, XMM4
+        PSRLD       XMM0, 24
+        PACKSSDW    XMM0, XMM0
+        PUNPCKLQDQ  XMM1, XMM0
+        PSRLDQ      XMM1, 4
+        PADDW       XMM0, XMM1
+        PSRLDQ      XMM1, 2
+        PADDW       XMM0, XMM1
+        PSRLDQ      XMM1, 2
+        PACKUSWB    XMM0, XMM0
+        MOVD        [RDX], XMM0
+        ADD         RAX, 16
+        ADD         RDX, 4
+        SUB         ECX, 1
+        JNZ         @LOOP
+
+        // remainder
+        PACKUSWB    XMM1, XMM1
+        PSRLDQ      XMM1, 2
+        MOVD        ECX, XMM1
+        MOV         BYTE PTR[RDX], CL
+        PSRLDQ      XMM1, 1
+        MOVD        ECX, XMM1
+        MOV         BYTE PTR[RDX + 1], CL
+        ADD         BYTE PTR[RDX], CL
+
+@REMAINDER:
+        CMP         R11D, 0
+        JZ          @ENDLOOP
+        MOV         ECX, R11D
+
+@LOOP2:
+        MOVD        XMM0, [RAX]
+        MULPS       XMM0, XMM6
+        PCMPEQD     XMM4, XMM4
+        PSRLD       XMM4, 1
+        ANDPS       XMM0, XMM4
+        CVTPS2DQ    XMM0, XMM0
+        MOVDQA      XMM3, XMM7
+        PCMPGTD     XMM3, XMM0
+        PAND        XMM0, XMM3
+        PANDN       XMM3, XMM7
+        POR         XMM0, XMM3
+        PMULUDQ     XMM0, XMM5
+        PSRLDQ      XMM0, 3
+        MOVD        EBX, XMM0
+        ADD         BYTE PTR[RDX], BL
+        ADD         BYTE PTR[RDX + 1], BL
+        MOV         BYTE PTR[RDX + 2], BL
+        ADD         RAX, 4
+        ADD         RDX, 1
+        SUB         ECX, 1
+        JNZ         @LOOP2
+
+@ENDLOOP:
+        MOV         BYTE PTR[RSI + 2], 0
+        MOV         BYTE PTR[RSI + 3], 0
+
+@END:
+        POP         RSI
+        POP         RDI
+        POP         RBX
+
+{$if defined(FPC)}end['XMM4', 'XMM5', 'XMM6', 'XMM7'];{$ifend}
+
+{$else}
+{$error 'Missing target'}
+{$ifend}
+end;
+
+{$ifend}
+
+//------------------------------------------------------------------------------
+// MakeAlphaEvenOddLCD_SSE2
+//------------------------------------------------------------------------------
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+
+procedure MakeAlphaEvenOddLCD_SSE2(Coverage: PSingleArray; AlphaValues: PByteArray; Count: integer; Color: TColor32);
+{$if defined(TARGET_x64) and defined(FPC)}begin{$ifend}
+asm
+{$if defined(TARGET_x86)}
+  // EAX <- Coverage
+  // EDX <- AlphaValues
+  // ECX <- Count
+  // Stack <- Color
+
+        TEST        ECX, ECX
+        JLE         @EXIT
+
+        PUSH        EBX
+        PUSH        EDI
+        PUSH        ESI
+
+        MOV         ESI, EDX
+        ADD         ESI, Count
+        MOV         EBX, Color
+        SHR         EBX, 24
+        MOV         EDI, 86
+        IMUL        EBX, EDI
+        MOVD        XMM7, EBX
+        PSHUFD      XMM7, XMM7, $44
+        PCMPEQD     XMM4, XMM4
+        PSRLD       XMM4, 1
+        PCMPEQD     XMM6, XMM6
+        PSRLD       XMM6, 15
+        MOVUPS      XMM5, DQWORD PTR [SSE_10000_FLOAT_ALIGNED]
+        PXOR        XMM1, XMM1
+        MOV         BYTE PTR [EDX], 0
+        MOV         BYTE PTR [EDX + 1], 0
+        MOV         EBX, ECX
+        AND         EBX, 3
+        SAR         ECX, 2
+        JNZ         @LOOP
+
+        JMP         @REMAINDER
+
+@LOOP:
+        MOVDQU      XMM0, [EAX]
+        ANDPS       XMM0, XMM4
+        MULPS       XMM0, XMM5
+        CVTPS2DQ    XMM0, XMM0
+        PAND        XMM0, XMM6
+        MOVDQA      XMM3, XMM0
+        PXOR        XMM3, XMM6
+        MOVDQA      XMM2, XMM3
+        PCMPGTD     XMM2, XMM0
+        PAND        XMM0, XMM2
+        PANDN       XMM2, XMM3
+        POR         XMM0, XMM2
+        PSHUFD      XMM3, XMM0, $FA
+        PSHUFD      XMM0, XMM0, $50
+        PMULUDQ     XMM0, XMM7
+        PMULUDQ     XMM3, XMM7
+        PSHUFD      XMM0, XMM0, $88
+        PSHUFD      XMM3, XMM3, $88
+        PUNPCKLQDQ  XMM0, XMM3
+        PSRLD       XMM0, 24
+        PACKSSDW    XMM0, XMM0
+        PUNPCKLQDQ  XMM1, XMM0
+        PSRLDQ      XMM1, 4
+        PADDW       XMM0, XMM1
+        PSRLDQ      XMM1, 2
+        PADDW       XMM0, XMM1
+        PSRLDQ      XMM1, 2
+        PACKUSWB    XMM0, XMM0
+        MOVD        [EDX], XMM0
+        ADD         EAX, 16
+        ADD         EDX, 4
+        SUB         ECX, 1
+        JNZ         @LOOP
+
+        PACKUSWB    XMM1, XMM1
+        PSRLDQ      XMM1, 2
+        MOVD        ECX, XMM1
+        MOV         BYTE PTR [EDX], CL
+        PSRLDQ      XMM1, 1
+        MOVD        ECX, XMM1
+        MOV         BYTE PTR [EDX + 1], CL
+        ADD         BYTE PTR [EDX], CL
+
+@REMAINDER:
+        CMP         EBX, 0
+        JZ          @ENDLOOP
+        MOV         ECX, EBX
+
+@LOOP2:
+        MOVD        XMM0, [EAX]
+        ANDPS       XMM0, XMM4
+        MULSS       XMM0, XMM5
+        CVTPS2DQ    XMM0, XMM0
+        PAND        XMM0, XMM6
+        MOVDQA      XMM3, XMM0
+        PXOR        XMM3, XMM6
+        MOVDQA      XMM2, XMM3
+        PCMPGTD     XMM2, XMM0
+        PAND        XMM0, XMM2
+        PANDN       XMM2, XMM3
+        POR         XMM0, XMM2
+        PMULUDQ     XMM0, XMM7
+        PSRLDQ      XMM0, 3
+        MOVD        EBX, XMM0
+        ADD         BYTE PTR [EDX], BL
+        ADD         BYTE PTR [EDX + 1], BL
+        MOV         BYTE PTR [EDX + 2], BL
+        ADD         EAX, 4
+        ADD         EDX, 1
+        SUB         ECX, 1
+        JNZ         @LOOP2
+
+@ENDLOOP:
+        MOV         BYTE PTR [ESI + 2], 0
+        MOV         BYTE PTR [ESI + 3], 0
+
+        POP         ESI
+        POP         EDI
+        POP         EBX
+@EXIT:
+
+{$elseif defined(TARGET_x64)}
+  // RCX <- Coverage
+  // RDX <- AlphaValues
+  // R8D <- Count
+  // R9D <- Color
+
+{$IFNDEF FPC}
+  .SAVENV XMM4
+  .SAVENV XMM5
+  .SAVENV XMM6
+  .SAVENV XMM7
+{$ENDIF}
+
+        TEST        R8D, R8D
+        JLE         @EXIT
+
+        MOV         R10, RDX
+        MOVSXD      R11, R8D
+        ADD         R10, R11          // R10 <- AlphaValues + Count
+
+        // (Color shr 24 * 86)
+        MOV         EAX, R9D
+        SHR         EAX, 24
+        IMUL        EAX, EAX, 86
+        MOVD        XMM7, EAX
+        PSHUFD      XMM7, XMM7, $44
+
+        PCMPEQD     XMM4, XMM4
+        PSRLD       XMM4, 1           // $7FFFFFFF (abs)
+
+        PCMPEQD     XMM6, XMM6
+        PSRLD       XMM6, 15          // $0001FFFF (EvenOdd)
+
+{$if (not defined(FPC))}
+        MOVUPS      XMM5, DQWORD PTR [SSE_10000_FLOAT_ALIGNED]
+{$else}
+        MOVUPS      XMM5, DQWORD PTR [rip+SSE_10000_FLOAT_ALIGNED]
+{$ifend}
+
+        PXOR        XMM1, XMM1
+        MOV         BYTE PTR [RDX], 0
+        MOV         BYTE PTR [RDX + 1], 0
+        MOV         R11D, R8D
+        AND         R11D, 3           // R11D <- Remainder
+        SAR         R8D, 2            // R8D <- Counter
+        JNZ         @LOOP
+
+        JMP         @REMAINDER
+
+@LOOP:
+        MOVDQU      XMM0, [RCX]
+        ANDPS       XMM0, XMM4
+        MULPS       XMM0, XMM5
+        CVTPS2DQ    XMM0, XMM0
+        PAND        XMM0, XMM6
+        MOVDQA      XMM3, XMM0
+        PXOR        XMM3, XMM6
+        MOVDQA      XMM2, XMM3
+        PCMPGTD     XMM2, XMM0
+        PAND        XMM0, XMM2
+        PANDN       XMM2, XMM3
+        POR         XMM0, XMM2
+        PSHUFD      XMM3, XMM0, $FA
+        PSHUFD      XMM0, XMM0, $50
+        PMULUDQ     XMM0, XMM7
+        PMULUDQ     XMM3, XMM7
+        PSHUFD      XMM0, XMM0, $88
+        PSHUFD      XMM3, XMM3, $88
+        PUNPCKLQDQ  XMM0, XMM3
+        PSRLD       XMM0, 24
+        PACKSSDW    XMM0, XMM0
+        PUNPCKLQDQ  XMM1, XMM0
+        PSRLDQ      XMM1, 4
+        PADDW       XMM0, XMM1
+        PSRLDQ      XMM1, 2
+        PADDW       XMM0, XMM1
+        PSRLDQ      XMM1, 2
+        PACKUSWB    XMM0, XMM0
+        MOVD        [RDX], XMM0
+        ADD         RCX, 16
+        ADD         RDX, 4
+        SUB         R8D, 1
+        JNZ         @LOOP
+
+        PACKUSWB    XMM1, XMM1
+        PSRLDQ      XMM1, 2
+        MOVD        EAX, XMM1
+        MOV         BYTE PTR [RDX], AL
+        PSRLDQ      XMM1, 1
+        MOVD        EAX, XMM1
+        MOV         BYTE PTR [RDX + 1], AL
+        ADD         BYTE PTR [RDX], AL
+
+@REMAINDER:
+        CMP         R11D, 0
+        JZ          @ENDLOOP
+        MOV         R8D, R11D         // R8D <- remaining count
+
+@LOOP2:
+        MOVD        XMM0, [RCX]
+        ANDPS       XMM0, XMM4
+        MULSS       XMM0, XMM5
+        CVTPS2DQ    XMM0, XMM0
+        PAND        XMM0, XMM6
+        MOVDQA      XMM3, XMM0
+        PXOR        XMM3, XMM6
+        MOVDQA      XMM2, XMM3
+        PCMPGTD     XMM2, XMM0
+        PAND        XMM0, XMM2
+        PANDN       XMM2, XMM3
+        POR         XMM0, XMM2
+        PMULUDQ     XMM0, XMM7
+        PSRLDQ      XMM0, 3
+        MOVD        EAX, XMM0
+        ADD         BYTE PTR [RDX], AL
+        ADD         BYTE PTR [RDX + 1], AL
+        MOV         BYTE PTR [RDX + 2], AL
+        ADD         RCX, 4
+        ADD         RDX, 1
+        SUB         R8D, 1
+        JNZ         @LOOP2
+
+@ENDLOOP:
+        MOV         BYTE PTR [R10 + 2], 0
+        MOV         BYTE PTR [R10 + 3], 0
+
+@EXIT:
+{$if defined(FPC)}end['XMM4', 'XMM5', 'XMM6', 'XMM7'];{$ifend}
+
+{$else}
+{$error 'Missing target'}
+{$ifend}
+end;
+
+{$ifend}
 
 //------------------------------------------------------------------------------
 // MakeAlphaEvenOddUP_SSE41
@@ -2248,36 +2836,6 @@ begin
 end;
 
 
-
-//------------------------------------------------------------------------------
-//
-//      LCD sub-pixel rendering
-//
-//------------------------------------------------------------------------------
-// References:
-// - https://en.wikipedia.org/wiki/Subpixel_rendering
-// - https://www.grc.com/cleartype.htm
-// - https://en.wikipedia.org/wiki/ClearType
-// - https://en.wikipedia.org/wiki/CoolType
-//------------------------------------------------------------------------------
-
-type
-{$if not defined(FPC)}
-  PByteArray = System.SysUtils.PByteArray;
-{$else}
-  PByteArray = SysUtils.PByteArray;
-{$ifend}
-
-type
-  TRGBTriple = packed record
-    B, G, R: Byte;
-  end;
-
-  PRGBTripleArray = ^TRGBTripleArray;
-  TRGBTripleArray = array [0..0] of TRGBTriple;
-
-  TMakeAlphaProcLCD = procedure(Coverage: PSingleArray; AlphaValues: PByteArray; Count: Integer; Color: TColor32);
-
 //------------------------------------------------------------------------------
 //
 //      Make Alpha NonZero LCD
@@ -2287,7 +2845,7 @@ type
 // Uses subpixel anti-aliasing.
 // For use in pfWinding/pfNonZero fill mode with a static color.
 //------------------------------------------------------------------------------
-procedure MakeAlphaNonZeroLCD(Coverage: PSingleArray; AlphaValues: PByteArray;
+procedure MakeAlphaNonZeroLCD_Pas(Coverage: PSingleArray; AlphaValues: PByteArray;
   Count: Integer; Color: TColor32);
 var
   I: Integer;
@@ -2329,7 +2887,7 @@ end;
 // Uses subpixel anti-aliasing.
 // For use in pfAlternate/pfEvenOdd fill mode with a static color.
 //------------------------------------------------------------------------------
-procedure MakeAlphaEvenOddLCD(Coverage: PSingleArray; AlphaValues: PByteArray;
+procedure MakeAlphaEvenOddLCD_Pas(Coverage: PSingleArray; AlphaValues: PByteArray;
   Count: Integer; Color: TColor32);
 var
   I: Integer;
@@ -2371,12 +2929,12 @@ end;
 // Uses subpixel anti-aliasing. Slightly softer AA transitions.
 // For use in pfWinding/pfNonZero fill mode with a static color.
 //------------------------------------------------------------------------------
-procedure MakeAlphaNonZeroLCD2(Coverage: PSingleArray; AlphaValues: PByteArray;
+procedure MakeAlphaNonZeroLCD2_Pas(Coverage: PSingleArray; AlphaValues: PByteArray;
   Count: Integer; Color: TColor32);
 var
   I: Integer;
 begin
-  MakeAlphaNonZeroLCD(Coverage, AlphaValues, Count, Color);
+  MakeAlphaNonZeroLCD_Pas(Coverage, AlphaValues, Count, Color);
   AlphaValues[Count + 2] := (AlphaValues[Count] + AlphaValues[Count + 1]) div 3;
   AlphaValues[Count + 3] := AlphaValues[Count + 1] div 3;
   for I := Count + 1 downto 2 do
@@ -2397,12 +2955,12 @@ end;
 // Uses subpixel anti-aliasing. Slightly softer AA transitions.
 // For use in pfAlternate/pfEvenOdd fill mode with a static color.
 //------------------------------------------------------------------------------
-procedure MakeAlphaEvenOddLCD2(Coverage: PSingleArray; AlphaValues: PByteArray;
+procedure MakeAlphaEvenOddLCD2_Pas(Coverage: PSingleArray; AlphaValues: PByteArray;
   Count: Integer; Color: TColor32);
 var
   I: Integer;
 begin
-  MakeAlphaEvenOddLCD(Coverage, AlphaValues, Count, Color);
+  MakeAlphaEvenOddLCD_Pas(Coverage, AlphaValues, Count, Color);
   AlphaValues[Count + 2] := (AlphaValues[Count] + AlphaValues[Count + 1]) div 3;
   AlphaValues[Count + 3] := AlphaValues[Count + 1] div 3;
   for I := Count + 1 downto 2 do
@@ -2413,6 +2971,256 @@ begin
   AlphaValues[0] := AlphaValues[0] div 3;
 end;
 
+
+//------------------------------------------------------------------------------
+// MakeAlphaLCD2Smooth_SSE2
+//------------------------------------------------------------------------------
+// Horizontal blur, 16 bytes at a time (SSE2) instead of one byte at a time (PAS).
+// new[i] = (old[i] + old[i-1] + old[i-2]) div 3
+//------------------------------------------------------------------------------
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+procedure MakeAlphaLCD2Smooth_SSE2(AlphaValues: PByteArray; Count: integer);
+{$if defined(TARGET_x64) and defined(FPC)}begin{$ifend}
+asm
+
+{$if defined(TARGET_x86)}
+  // EAX <- AlphaValues
+  // EDX <- Count
+        PUSH        EBX
+        PUSH        ESI
+        PUSH        EDI
+        MOV         ESI, EAX            // ESI <- AlphaValues
+        MOV         EDI, EDX            // EDI <- Count
+
+        MOV         ECX, $0000AAAB      // reciprocal multiplier for div 3
+        MOVD        XMM5, ECX
+        PSHUFLW     XMM5, XMM5, 0
+        PSHUFD      XMM5, XMM5, $44
+        PXOR        XMM4, XMM4          // 0 for byte -> word
+
+        // i = 2 to Count + 3  (N = Count + 2 elements)
+        MOV         EBX, EDI
+        ADD         EBX, 2              // EBX <- N
+        CMP         EBX, 0
+        JLE         @END
+
+        MOV         ECX, EBX
+        SHR         ECX, 4              // ECX <- full 16-byte parts
+        MOV         EDX, EBX
+        AND         EDX, 15             // EDX <- remainder element count
+
+        CMP         ECX, 0
+        JZ          @REMAINDERSETUP
+
+        LEA         EAX, [ESI + EDI - 12]  // EAX <- &AlphaValues[Count - 12] (low address of top part)
+@LOOP:
+// Load [i], [i-1], [i-2]
+        MOVDQU      XMM0, [EAX]         // orig[i to i + 15]
+        MOVDQU      XMM1, [EAX - 1]     // orig[i - 1 to i + 14]
+        MOVDQU      XMM2, [EAX - 2]     // orig[i - 2 to i + 13]
+
+// low 8 bytes (0..7)
+        MOVDQA      XMM3, XMM0
+        PUNPCKLBW   XMM3, XMM4          // a[i]   byte -> word (low 8)
+        MOVDQA      XMM6, XMM1
+        PUNPCKLBW   XMM6, XMM4          // a[i - 1] byte -> word (low 8)
+        PADDW       XMM3, XMM6          // sum = a[i] + a[i - 1]
+        MOVDQA      XMM6, XMM2
+        PUNPCKLBW   XMM6, XMM4          // a[i - 2] byte->word
+        PADDW       XMM3, XMM6          // sum = sum + a[i - 2]   (max 3*255=765)
+        PMULHUW     XMM3, XMM5          // sum * $AAAB, keep high 16 bits (the shr 16 part of the div 3)
+        PSRLW       XMM3, 1             // remaining right shift 1 - floor(sum div 3)
+        MOVDQA      XMM6, XMM3          // result for the low 8 elements
+
+// high 8 bytes of the part (8..15)
+        MOVDQA      XMM3, XMM0
+        PUNPCKHBW   XMM3, XMM4          // a[i]   byte -> word (high 8)
+        MOVDQA      XMM7, XMM1
+        PUNPCKHBW   XMM7, XMM4          // a[i - 1] byte -> word (high 8)
+        PADDW       XMM3, XMM7
+        MOVDQA      XMM7, XMM2
+        PUNPCKHBW   XMM7, XMM4          // a[i - 2] byte -> word (high 8)
+        PADDW       XMM3, XMM7          // sum for the high 8
+        PMULHUW     XMM3, XMM5          // div 3, high 16 bits
+        PSRLW       XMM3, 1             // div 3  => floor(sum div 3) for the high 8
+
+// pack low 8 + high 8 word results into bytes
+        PACKUSWB    XMM6, XMM3          // XMM6 <= lo words, XMM3 = hi words -> 16 bytes
+        MOVDQU      [EAX], XMM6         // write to orig[i to i + 15]
+        SUB         EAX, 16
+        DEC         ECX
+        JNZ         @LOOP
+
+@REMAINDERSETUP:
+        CMP         EDX, 0
+        JZ          @END
+        MOV         ECX, EDX            // ECX <- remainder loop counter
+        LEA         EAX, [ESI + 1]
+        ADD         EAX, EDX            // EAX <- AlphaValues[1 + remainder]
+@REMAINDERLOOP:
+        MOVZX       EBX, BYTE PTR [EAX]           // EBX <- a[i]      (zero-extend byte -> 32-bit)
+        MOVZX       EDX, BYTE PTR [EAX - 1]       // EDX <- a[i - 1]
+        ADD         EBX, EDX                      // EBX <- a[i] + a[i - 1]
+        MOVZX       EDX, BYTE PTR [EAX - 2]       // EDX <- a[i - 2]
+        ADD         EBX, EDX                      // EBX <- a[i] + a[i - 1] + a[i - 2]   (max 765)
+        IMUL        EBX, EBX, 43691               // EBX <- sum * 43691   (43691 = $AAAB, reciprocal)
+        SHR         EBX, 17                       // EBX <- EBX shr 17     floor(sum div 3)
+        MOV         BYTE PTR [EAX], BL            // write
+        DEC         EAX
+        DEC         ECX
+        JNZ         @REMAINDERLOOP
+
+@END:
+// I = 1: AlphaValues[1] := (AlphaValues[0] + AlphaValues[1]) div 3
+        MOVZX       ECX, BYTE PTR [ESI]
+        MOVZX       EBX, BYTE PTR [ESI + 1]
+        ADD         ECX, EBX
+        IMUL        ECX, ECX, 43691
+        SHR         ECX, 17
+        MOV         BYTE PTR [ESI + 1], CL
+// I = 0: AlphaValues[0] := AlphaValues[0] div 3
+        MOVZX       ECX, BYTE PTR [ESI]
+        IMUL        ECX, ECX, 43691
+        SHR         ECX, 17
+        MOV         BYTE PTR [ESI], CL
+
+        POP         EDI
+        POP         ESI
+        POP         EBX
+{$elseif defined(TARGET_x64)}
+  // RCX <- AlphaValues
+  // EDX <- Count
+{$IFNDEF FPC}
+  .SAVENV XMM4
+  .SAVENV XMM5
+  .SAVENV XMM6
+  .SAVENV XMM7
+{$ENDIF}
+        PUSH        RBX
+        PUSH        RSI
+        MOV         RSI, RCX            // RSI <- AlphaValues
+
+        MOV         ECX, $0000AAAB
+        MOVD        XMM5, ECX
+        PSHUFLW     XMM5, XMM5, 0
+        PSHUFD      XMM5, XMM5, $44
+        PXOR        XMM4, XMM4
+
+        MOV         EBX, EDX
+        ADD         EBX, 2              // EBX <- N = Count + 2
+        CMP         EBX, 0
+        JLE         @END
+
+        MOV         ECX, EBX
+        SHR         ECX, 4              // ECX <- full 16-byte parts
+        MOV         R8D, EBX
+        AND         R8D, 15             // R8D <- remainder element count
+
+        CMP         ECX, 0
+        JZ          @REMAINDERSETUP
+
+        MOVSXD      R9, EDX
+        LEA         RAX, [RSI + R9 - 12]   // RAX <- &AlphaValues[Count-12]
+@LOOP:
+        MOVDQU      XMM0, [RAX]
+        MOVDQU      XMM1, [RAX - 1]
+        MOVDQU      XMM2, [RAX - 2]
+
+        MOVDQA      XMM3, XMM0
+        PUNPCKLBW   XMM3, XMM4
+        MOVDQA      XMM6, XMM1
+        PUNPCKLBW   XMM6, XMM4
+        PADDW       XMM3, XMM6
+        MOVDQA      XMM6, XMM2
+        PUNPCKLBW   XMM6, XMM4
+        PADDW       XMM3, XMM6
+        PMULHUW     XMM3, XMM5
+        PSRLW       XMM3, 1
+        MOVDQA      XMM6, XMM3
+
+        MOVDQA      XMM3, XMM0
+        PUNPCKHBW   XMM3, XMM4
+        MOVDQA      XMM7, XMM1
+        PUNPCKHBW   XMM7, XMM4
+        PADDW       XMM3, XMM7
+        MOVDQA      XMM7, XMM2
+        PUNPCKHBW   XMM7, XMM4
+        PADDW       XMM3, XMM7
+        PMULHUW     XMM3, XMM5
+        PSRLW       XMM3, 1
+
+        PACKUSWB    XMM6, XMM3
+        MOVDQU      [RAX], XMM6
+
+        SUB         RAX, 16
+        DEC         ECX
+        JNZ         @LOOP
+
+@REMAINDERSETUP:
+        CMP         R8D, 0
+        JZ          @END
+        MOV         ECX, R8D            // ECX <- remainder counter
+        LEA         RAX, [RSI + 1]
+        MOVSXD      R9, R8D
+        ADD         RAX, R9             // RAX <- &AlphaValues[1 + remainder]
+@REMAINDERLOOP:
+        MOVZX       EBX, BYTE PTR [RAX]
+        MOVZX       R8D, BYTE PTR [RAX - 1]
+        ADD         EBX, R8D
+        MOVZX       R8D, BYTE PTR [RAX - 2]
+        ADD         EBX, R8D
+        IMUL        EBX, EBX, 43691
+        SHR         EBX, 17
+        MOV         BYTE PTR [RAX], BL
+        DEC         RAX
+        DEC         ECX
+        JNZ         @REMAINDERLOOP
+
+@END:
+        MOVZX       ECX, BYTE PTR [RSI]
+        MOVZX       EBX, BYTE PTR [RSI + 1]
+        ADD         ECX, EBX
+        IMUL        ECX, ECX, 43691
+        SHR         ECX, 17
+        MOV         BYTE PTR [RSI + 1], CL
+
+        MOVZX       ECX, BYTE PTR [RSI]
+        IMUL        ECX, ECX, 43691
+        SHR         ECX, 17
+        MOV         BYTE PTR [RSI], CL
+
+        POP         RSI
+        POP         RBX
+{$if defined(FPC)}end['XMM4', 'XMM5', 'XMM6', 'XMM7'];{$ifend}
+{$else}
+{$error 'Missing target'}
+{$ifend}
+end;
+{$ifend}
+
+//------------------------------------------------------------------------------
+// MakeAlphaNonZeroLCD2_SSE2
+//------------------------------------------------------------------------------
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+procedure MakeAlphaNonZeroLCD2_SSE2(Coverage: PSingleArray; AlphaValues: PByteArray;
+  Count: Integer; Color: TColor32);
+begin
+  MakeAlphaNonZeroLCD_SSE2(Coverage, AlphaValues, Count, Color);
+  MakeAlphaLCD2Smooth_SSE2(AlphaValues, Count);
+end;
+{$ifend}
+
+//------------------------------------------------------------------------------
+// MakeAlphaEvenOddLCD2_SSE2
+//------------------------------------------------------------------------------
+{$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
+procedure MakeAlphaEvenOddLCD2_SSE2(Coverage: PSingleArray; AlphaValues: PByteArray;
+  Count: Integer; Color: TColor32);
+begin
+  MakeAlphaEvenOddLCD_SSE2(Coverage, AlphaValues, Count, Color);
+  MakeAlphaLCD2Smooth_SSE2(AlphaValues, Count);
+end;
+{$ifend}
 
 //------------------------------------------------------------------------------
 // CombineLineLCD
@@ -3103,6 +3911,8 @@ var
 begin
   if (not Bitmap.MeasuringMode) then
   begin
+    UpdateMakeAlphaProc;
+
     APoints := ScalePolyPolygon(Points, 3, 1);
 
     R.Top := ClipRect.Top;
@@ -3129,6 +3939,14 @@ end;
 
 //------------------------------------------------------------------------------
 
+procedure TPolygonRenderer32LCD.UpdateMakeAlphaProc;
+begin
+   MakeAlpha[TPolyFillMode.pfEvenOdd] := MakeAlphaEvenOddLCD;
+   MakeAlpha[TPolyFillMode.pfNonZero] := MakeAlphaNonZeroLCD;
+end;
+
+//------------------------------------------------------------------------------
+
 {$W+}
 procedure TPolygonRenderer32LCD.RenderSpan(const Span: TValueSpan;
   DstY: Integer);
@@ -3138,8 +3956,6 @@ var
   AlphaValues: PByteArray;
   Count: Integer;
   X, Offset: Integer;
-const
-  MakeAlpha: array [TPolyFillMode] of TMakeAlphaProcLCD = (MakeAlphaEvenOddLCD, MakeAlphaNonZeroLCD);
 begin
   Count := Span.HighX - Span.LowX + 1;
   X := DivMod(Span.LowX, 3, Offset);
@@ -3186,8 +4002,6 @@ var
   AlphaValues: PByteArray;
   Count: Integer;
   X, Offset: Integer;
-const
-  MakeAlpha: array [TPolyFillMode] of TMakeAlphaProcLCD = (MakeAlphaEvenOddLCD2, MakeAlphaNonZeroLCD2);
 begin
   Count := Span.HighX - Span.LowX + 1;
   X := DivMod(Span.LowX, 3, Offset);
@@ -3222,6 +4036,13 @@ begin
 end;
 {$W-}
 
+//------------------------------------------------------------------------------
+
+procedure TPolygonRenderer32LCD2.UpdateMakeAlphaProc;
+begin
+   MakeAlpha[TPolyFillMode.pfEvenOdd] := MakeAlphaEvenOddLCD2;
+   MakeAlpha[TPolyFillMode.pfNonZero] := MakeAlphaNonZeroLCD2;
+end;
 
 //------------------------------------------------------------------------------
 //
@@ -3252,6 +4073,10 @@ begin
   PolygonsRegistry.RegisterBinding(@@MakeAlphaNonZeroUP, 'MakeAlphaNonZeroUP');
   PolygonsRegistry.RegisterBinding(@@MakeAlphaEvenOddUPF, 'MakeAlphaEvenOddUPF');
   PolygonsRegistry.RegisterBinding(@@MakeAlphaNonZeroUPF, 'MakeAlphaNonZeroUPF');
+  PolygonsRegistry.RegisterBinding(@@MakeAlphaEvenOddLCD, 'MakeAlphaEvenOddLCD');
+  PolygonsRegistry.RegisterBinding(@@MakeAlphaNonZeroLCD, 'MakeAlphaNonZeroLCD');
+  PolygonsRegistry.RegisterBinding(@@MakeAlphaEvenOddLCD2, 'MakeAlphaEvenOddLCD2');
+  PolygonsRegistry.RegisterBinding(@@MakeAlphaNonZeroLCD2, 'MakeAlphaNonZeroLCD2');
 end;
 
 var
@@ -3277,15 +4102,23 @@ procedure RegisterBindingFunctions;
 begin
   // EvenOddUP
   PolygonsRegistry[@@MakeAlphaEvenOddUP].Add(   @MakeAlphaEvenOddUP_Pas,        [isPascal]).Name := 'MakeAlphaEvenOddUP_Pas';
+  PolygonsRegistry[@@MakeAlphaEvenOddLCD].Add(  @MakeAlphaEvenOddLCD_Pas,       [isPascal]).Name := 'MakeAlphaEvenOddLCD_Pas';
+  PolygonsRegistry[@@MakeAlphaEvenOddLCD2].Add( @MakeAlphaEvenOddLCD2_Pas,      [isPascal]).Name := 'MakeAlphaEvenOddLCD2_Pas';
 {$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
   PolygonsRegistry[@@MakeAlphaEvenOddUP].Add(   @MakeAlphaEvenOddUP_SSE2,       [isSSE2]).Name := 'MakeAlphaEvenOddUP_SSE2';
   PolygonsRegistry[@@MakeAlphaEvenOddUP].Add(   @MakeAlphaEvenOddUP_SSE41,      [isSSE41]).Name := 'MakeAlphaEvenOddUP_SSE41';
+  PolygonsRegistry[@@MakeAlphaEvenOddLCD].Add(  @MakeAlphaEvenOddLCD_SSE2,      [isSSE2]).Name := 'MakeAlphaEvenOddLCD_SSE2';
+  PolygonsRegistry[@@MakeAlphaEvenOddLCD2].Add( @MakeAlphaEvenOddLCD2_SSE2,     [isSSE2]).Name := 'MakeAlphaEvenOddLCD2_SSE2';
 {$ifend}
 
   // NonZeroUP
   PolygonsRegistry[@@MakeAlphaNonZeroUP].Add(   @MakeAlphaNonZeroUP_Pas,        [isPascal]).Name := 'MakeAlphaNonZeroUP_Pas';
+  PolygonsRegistry[@@MakeAlphaNonZeroLCD].Add(  @MakeAlphaNonZeroLCD_Pas,       [isPascal]).Name := 'MakeAlphaNonZeroLCD_Pas';
+  PolygonsRegistry[@@MakeAlphaNonZeroLCD2].Add( @MakeAlphaNonZeroLCD2_Pas,      [isPascal]).Name := 'MakeAlphaNonZeroLCD2_Pas';
 {$if (not defined(PUREPASCAL)) and (not defined(OMIT_SSE2))}
   PolygonsRegistry[@@MakeAlphaNonZeroUP].Add(   @MakeAlphaNonZeroUP_SSE2,       [isSSE2]).Name := 'MakeAlphaNonZeroUP_SSE2';
+  PolygonsRegistry[@@MakeAlphaNonZeroLCD].Add(  @MakeAlphaNonZeroLCD_SSE2,      [isSSE2]).Name := 'MakeAlphaNonZeroLCD_SSE2';
+  PolygonsRegistry[@@MakeAlphaNonZeroLCD2].Add( @MakeAlphaNonZeroLCD2_SSE2,     [isSSE2]).Name := 'MakeAlphaNonZeroLCD2_SSE2';
 {$ifend}
 
   // EvenOddUPF

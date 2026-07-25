@@ -132,6 +132,12 @@ procedure SSE_FloatOne_ALIGNED;
 
 // 1 x $80000000
 procedure SSE_80000000_ALIGNED;
+
+// 4 x $10000 (65536) float
+procedure SSE_10000_FLOAT_ALIGNED;
+
+// 4 x $10000 (65536)
+procedure SSE_10000_ALIGNED;
 {$ifend}
 
 //------------------------------------------------------------------------------
@@ -139,6 +145,26 @@ procedure SSE_80000000_ALIGNED;
 //------------------------------------------------------------------------------
 
 implementation
+
+procedure SSE_10000_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dd $00010000, $00010000, $00010000, $00010000
+end;
+
+procedure SSE_10000_FLOAT_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dd $47800000, $47800000, $47800000, $47800000
+end;
 
 procedure SSE_FF00FF00_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
 asm
