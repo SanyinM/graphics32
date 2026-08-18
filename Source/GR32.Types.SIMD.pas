@@ -136,8 +136,53 @@ procedure SSE_FloatHalf_ALIGNED;
 // Four aligned 1.0 floats
 procedure SSE_FloatOne_ALIGNED;
 
+// Four aligned 2.0 floats
+procedure SSE_FloatTwo_ALIGNED;
+
 // 1 x $80000000
 procedure SSE_80000000_ALIGNED;
+
+// (6,7,6,7,6,7,6,7,14,15,14,15,14,15,14,15)
+procedure SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED;
+
+procedure SSE_AlphaMask_ALIGNED;
+
+procedure SSE_AlphaExtractMask_ALIGNED;
+
+// Ra words -> Alpha bytes (for PSHUFB)
+procedure SSE_RaToAlpha_Mask_ALIGNED;
+
+// Four 1 dwords
+procedure SSE_00000001_ALIGNED;
+
+// ARGB alpha byte positions: B G R A  B G R A ...
+procedure SSE_AlphaClearMask_ALIGNED;
+
+// 4 x 255 (floats)
+procedure SSE_255f_ALIGNED;
+
+// Broadcast Wa across all 4 word lanes
+procedure SSE_Wa01_Mask_ALIGNED;
+
+// $00000000 $00000000 $00000000 $FFFFFFFF
+procedure SSE_AlphaLaneMask_ALIGNED;
+
+// PSHUFB mask
+procedure SSE_DwordsToWords_Mask_ALIGNED;
+
+procedure SSE_PSHUFB_R4_BYTE_MASK;
+
+procedure SSE_PSHUFB_G4_BYTE_MASK;
+
+procedure SSE_PSHUFB_B4_BYTE_MASK;
+
+procedure SSE_PSHUFB_A4_BYTE_MASK;
+
+// 4 x (1 / 255.0) floats
+procedure SSE_INV255_FLOAT_ALIGNED;
+
+// $FF000000 $FF000000 $FF000000 $FF000000
+procedure SSE_ALPHA_MASK_ALIGNED;
 {$ifend}
 
 //------------------------------------------------------------------------------
@@ -145,6 +190,18 @@ procedure SSE_80000000_ALIGNED;
 //------------------------------------------------------------------------------
 
 implementation
+
+
+procedure SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db $6, $7, $6, $7, $6, $7, $6, $7
+  db $E, $F, $E, $F, $E, $F, $E, $F
+end;
 
 // 8 x $FF00
 procedure SSE_FF00FF00_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
@@ -263,6 +320,199 @@ asm
   db $00, $00, $00, $00
   db $00, $00, $00, $00
 end;
+
+procedure SSE_AlphaMask_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dw $0000, $0000, $0000, $FFFF
+  dw $0000, $0000, $0000, $FFFF
+end;
+
+procedure SSE_AlphaExtractMask_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+   dd $0F0B0703
+   dd $80808080
+   dd $80808080
+   dd $80808080
+end;
+
+procedure SSE_FloatTwo_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dd $40000000
+  dd $40000000
+  dd $40000000
+  dd $40000000
+end;
+
+procedure SSE_RaToAlpha_Mask_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db $80, $80, $80, $00, $80, $80, $80, $02
+  db $80, $80, $80, $04, $80, $80, $80, $06
+end;
+
+procedure SSE_00000001_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dd $00000001
+  dd $00000001
+  dd $00000001
+  dd $00000001
+end;
+
+procedure SSE_AlphaClearMask_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+   dd $00FFFFFF
+   dd $00FFFFFF
+   dd $00FFFFFF
+   dd $00FFFFFF
+end;
+
+procedure SSE_255f_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dd $437F0000
+  dd $437F0000
+  dd $437F0000
+  dd $437F0000
+end;
+
+procedure SSE_Wa01_Mask_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db $00, $80, $00, $80, $00, $80, $00, $80
+  db $04, $80, $04, $80, $04, $80, $04, $80
+end;
+
+procedure SSE_AlphaLaneMask_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dd $00000000
+  dd $00000000
+  dd $00000000
+  dd $FFFFFFFF
+end;
+
+procedure SSE_DwordsToWords_Mask_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db $08, $80, $08, $80, $08, $80, $08, $80
+  db $0C, $80, $0C, $80, $0C, $80, $0C, $80
+end;
+
+procedure SSE_PSHUFB_R4_BYTE_MASK; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db 2, 6, 10, 14, $80, $80, $80, $80
+  db $80, $80, $80, $80, $80, $80, $80, $80
+end;
+
+procedure SSE_PSHUFB_G4_BYTE_MASK; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db 1, 5, 9, 13, $80, $80, $80, $80
+  db $80, $80, $80, $80, $80, $80, $80, $80
+end;
+
+procedure SSE_PSHUFB_B4_BYTE_MASK; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db 0, 4, 8, 12, $80, $80, $80, $80
+  db $80, $80, $80, $80, $80, $80, $80, $80
+end;
+
+procedure SSE_PSHUFB_A4_BYTE_MASK; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  db 3, 7, 11, 15, $80, $80, $80, $80
+  db $80, $80, $80, $80, $80, $80, $80, $80
+end;
+
+procedure SSE_INV255_FLOAT_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$ifdef FPC}
+  ALIGN 16
+{$else}
+  .ALIGN 16
+{$endif}
+  dd $3B808081
+  dd $3B808081
+  dd $3B808081
+  dd $3B808081
+end;
+
+procedure SSE_ALPHA_MASK_ALIGNED; {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+  {$IFDEF FPC}
+  ALIGN 16
+  {$ELSE}
+  .ALIGN 16
+  {$ENDIF}
+  dd $FF000000
+  dd $FF000000
+  dd $FF000000
+  dd $FF000000
+end;
+
 
 end.
 

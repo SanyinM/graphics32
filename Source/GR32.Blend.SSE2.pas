@@ -56,6 +56,8 @@ uses
 function BlendReg_SSE2(F, B: TColor32): TColor32;
 function BlendReg_SSE41(F, B: TColor32): TColor32; {$IFDEF FPC} assembler; {$ENDIF}
 procedure BlendMem_SSE2(F: TColor32; var B: TColor32); {$IFDEF FPC} assembler; {$ENDIF}
+procedure BlendMem_SSE2_Sanyin(F: TColor32; var B: TColor32); {$IFDEF FPC} assembler; {$ENDIF}
+procedure BlendMem_SSE41_Sanyin(F: TColor32; var B: TColor32); {$IFDEF FPC} assembler; {$ENDIF}
 procedure BlendMems_SSE2(F: TColor32; B: PColor32; Count: Integer); {$IFDEF FPC} assembler; {$ENDIF}
 
 function BlendRegEx_SSE2(F, B: TColor32; M: Cardinal): TColor32; {$IFDEF FPC} assembler; {$ENDIF}
@@ -67,6 +69,7 @@ procedure BlendMemRGB_SSE2(F: TColor32; var B: TColor32; W: Cardinal); {$IFDEF F
 procedure BlendLine_SSE2(Src, Dst: PColor32; Count: Integer); {$IFDEF FPC} assembler; {$ENDIF}
 {$if not defined(FPC)}
 procedure BlendLine_SSE41(Src, Dst: PColor32; Count: Integer); {$IFDEF FPC} assembler; {$ENDIF}
+procedure BlendLine_SSE41_Sanyin(Src, Dst: PColor32; Count: Integer); {$IFDEF FPC} assembler; {$ENDIF}
 {$ifend}
 procedure BlendLineEx_SSE2(Src, Dst: PColor32; Count: Integer; M: Cardinal); {$IFDEF FPC} assembler; {$ENDIF}
 
@@ -75,13 +78,28 @@ procedure BlendLineEx_SSE2(Src, Dst: PColor32; Count: Integer; M: Cardinal); {$I
 // Merge
 //------------------------------------------------------------------------------
 function MergeReg_SSE2(F, B: TColor32): TColor32; {$IFDEF FPC} assembler; {$ENDIF}
+function MergeReg_SSE41_Sanyin(F, B: TColor32): TColor32; {$IFDEF FPC} assembler; {$ENDIF}
+function MergeReg_SSE2_Sanyin(F, B: TColor32): TColor32; {$IFDEF FPC} assembler; {$ENDIF}
+function MergeReg_SSE2_Float_Sanyin(F, B: TColor32): TColor32; {$IFDEF FPC} assembler; {$ENDIF}
+function MergeReg_SSE41_Float_Sanyin(F, B: TColor32): TColor32; {$IFDEF FPC} assembler; {$ENDIF}
 
+procedure MergeLine_SSE2_Sanyin(Src, Dst: PColor32; Count: Integer);
+procedure MergeLine_SSE2_Sanyin_2(Src, Dst: PColor32; Count: Integer);
+
+procedure MergeMem_SSE2_Sanyin(F: TColor32; var B: TColor32);
+procedure MergeMem_SSE2_Float_Sanyin(F: TColor32; var B: TColor32);
 {$if not defined(FPC)}
-function MergeReg_SSE41(F, B: TColor32): TColor32;
+function  MergeReg_SSE41(F, B: TColor32): TColor32;
 procedure MergeMem_SSE41(F: TColor32; var B: TColor32);
-procedure MergeLine_SSE41(Src, Dst: PColor32; Count: Integer);
-{$ifend}
+procedure MergeMem_SSE41_Sanyin(F: TColor32; var B: TColor32);
+procedure MergeMem_SSE41_Float_Sanyin(F: TColor32; var B: TColor32);
 
+procedure MergeLine_SSE41(Src, Dst: PColor32; Count: Integer);
+procedure MergeLine_SSE41_Sanyin(Src, Dst: PColor32; Count: Integer);
+procedure MergeLine_SSE41_Sanyin_2(Src, Dst: PColor32; Count: Integer);
+procedure MergeLine_SSE41_Float_Sanyin(Src, Dst: PColor32; Count: Integer);
+{$ifend}
+procedure MergeLine_SSE2_Float_Sanyin(Src, Dst: PColor32; Count: Integer);
 
 //------------------------------------------------------------------------------
 // Combine
@@ -305,6 +323,157 @@ asm
 {$ifend}
 end;
 
+//------------------------------------------------------------------------------
+// BlendMem
+//------------------------------------------------------------------------------
+
+// Define early exit (slower)
+//
+{.$DEFINE EARLY_EXIT}
+//
+procedure BlendMem_SSE41_Sanyin(F: TColor32; var B: TColor32); {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+(*
+        BlendMem_SSE41_Sanyin
+        Contributed by: Sanyin
+        Errors: 0
+        Calculates "x div 255" as:
+          x div 255 = ((x + 128) * 257) >> 16
+*)
+asm
+{$if defined(TARGET_x86)}
+  // EAX - Color X (F)
+  // [EDX] - Color Y (B)
+{$IFDEF EARLY_EXIT}
+        TEST      EAX, $FF000000
+        JZ        @1
+        CMP       EAX, $FF000000
+        JNC       @2
+{$ENDIF}
+        MOVD      XMM0, EAX
+        MOVD      XMM1, [EDX]
+        PMOVZXBW  XMM0, XMM0
+        PMOVZXBW  XMM1, XMM1
+        PSHUFLW   XMM2, XMM0, $FF
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM2
+        PMULLW    XMM0, XMM2
+        PMULLW    XMM1, XMM3
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM0
+        MOVD      [EDX], XMM0
+        RET
+{$IFDEF EARLY_EXIT}
+@1:     RET
+@2:     MOV       [EDX], EAX
+{$ENDIF}
+{$elseif defined(TARGET_x64)}
+  // ECX - Color X (F)
+  // [EDX] - Color Y (B)
+{$IFDEF EARLY_EXIT}
+        TEST      ECX, $FF000000
+        JZ        @1
+        CMP       ECX, $FF000000
+        JNC       @2
+{$ENDIF}
+        MOVD      XMM0, ECX
+        MOVD      XMM1, [RDX]
+        PMOVZXBW  XMM0, XMM0
+        PMOVZXBW  XMM1, XMM1
+        PSHUFLW   XMM2, XMM0, $FF
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM2
+        PMULLW    XMM0, XMM2
+        PMULLW    XMM1, XMM3
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM0
+        MOVD      [RDX], XMM0
+        RET
+{$IFDEF EARLY_EXIT}
+@1:     RET
+@2:     MOV       [RDX], ECX
+{$ENDIF}
+{$ifend}
+end;
+
+//------------------------------------------------------------------------------
+procedure BlendMem_SSE2_Sanyin(F: TColor32; var B: TColor32); {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+(*
+        BlendMem_SSE2_Sanyin
+        Contributed by: Sanyin
+        Errors: 0
+        Calculates "x div 255" as:
+          x div 255 = ((x + 128) * 257) >> 16
+*)
+{$if defined(TARGET_x64) and defined(FPC)}begin{$ifend}
+asm
+{$if defined(TARGET_x64) and not defined(FPC)}
+        .SAVENV XMM4
+{$ifend}
+{$if defined(TARGET_x86)}
+  // EAX - Color X (F)
+  // [EDX] - Color Y (B)
+{$IFDEF EARLY_EXIT}
+        TEST      EAX, $FF000000
+        JZ        @1
+        CMP       EAX, $FF000000
+        JNC       @2
+{$ENDIF}
+        MOVD      XMM0, EAX
+        MOVD      XMM1, [EDX]
+        PXOR      XMM4, XMM4
+        PUNPCKLBW XMM0, XMM4
+        PUNPCKLBW XMM1, XMM4
+        PSHUFLW   XMM2, XMM0, $FF
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM2
+        PMULLW    XMM0, XMM2
+        PMULLW    XMM1, XMM3
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM0
+        MOVD      [EDX], XMM0
+        RET
+{$IFDEF EARLY_EXIT}
+@1:     RET
+@2:     MOV       [EDX], EAX
+{$ENDIF}
+{$elseif defined(TARGET_x64)}
+  // ECX - Color X (F)
+  // [EDX] - Color Y (B)
+{$IFDEF EARLY_EXIT}
+        TEST      ECX, $FF000000
+        JZ        @1
+        CMP       ECX, $FF000000
+        JNC       @2
+{$ENDIF}
+        MOVD      XMM0, ECX
+        MOVD      XMM1, [RDX]
+        PXOR      XMM4, XMM4
+        PUNPCKLBW XMM0, XMM4
+        PUNPCKLBW XMM1, XMM4
+        PSHUFLW   XMM2, XMM0, $FF
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM2
+        PMULLW    XMM0, XMM2
+        PMULLW    XMM1, XMM3
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM0
+        MOVD      [RDX], XMM0
+        RET
+{$IFDEF EARLY_EXIT}
+@1:     RET
+@2:     MOV       [RDX], ECX
+{$ENDIF}
+{$ifend}
+{$if defined(TARGET_x64) and defined(FPC)}end['XMM4'];{$ifend}
+end;
 
 //------------------------------------------------------------------------------
 // BlendRegEx
@@ -755,7 +924,7 @@ asm
 
         MOVDQU    XMM1, [EDX]      // Load 4 destination pixels: [d4 d3 d2 d1]
         // Early exit: If all pixels in the block are fully opaque (Alpha=255), direct copy.
-        // PTEST sets CF if (NOT XMM0 AND XMM6) == 0. With XMM6 as alpha mask,
+        // PTEST sets CF if (NOT XMM0 AND XMM6) = 0. With XMM6 as alpha mask,
         // this means all alpha bits in XMM0 are set.
         JC        @Opaque4         // CF=1: All alphas are 255
 
@@ -1249,6 +1418,404 @@ asm
 {$ifend}
 end;
 
+procedure BlendLine_SSE2_Sanyin(Src, Dst: PColor32; Count: Integer); {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$if defined(TARGET_x86)}
+
+// EAX <- Src, EDX <- Dst, ECX <- Count
+
+        TEST      ECX, ECX
+        JLE       @Done
+
+        PUSH      ECX
+        SHR       ECX, 2
+        JZ        @TailPop
+
+        PXOR      XMM4, XMM4
+
+@Loop4:
+        MOVDQU    XMM0, [EAX]
+        MOVDQU    XMM2, [EDX]
+
+        MOVDQA    XMM1, XMM0
+        PUNPCKLBW XMM0, XMM4
+        PUNPCKHBW XMM1, XMM4
+        MOVDQA    XMM3, XMM2
+        PUNPCKLBW XMM2, XMM4
+        PUNPCKHBW XMM3, XMM4
+        MOVDQA    XMM4, XMM0
+        PSHUFLW   XMM4, XMM4, $FF
+        PSHUFHW   XMM4, XMM4, $FF
+        PMULLW    XMM0, XMM4
+        MOVDQA    XMM5, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM2, XMM5
+        PADDW     XMM0, XMM2
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        MOVDQA    XMM4, XMM1
+        PSHUFLW   XMM4, XMM4, $FF
+        PSHUFHW   XMM4, XMM4, $FF
+        PMULLW    XMM1, XMM4
+        MOVDQA    XMM5, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM3, XMM5
+        PADDW     XMM1, XMM3
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM1, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM1
+        MOVDQU    [EDX], XMM0
+        ADD       EAX, 16
+        ADD       EDX, 16
+        PXOR      XMM4, XMM4
+        DEC       ECX
+        JNZ       @Loop4
+
+@TailPop:
+        POP       ECX
+        AND       ECX, 3
+        JZ        @Done
+        PXOR      XMM4, XMM4
+
+@Loop1:
+        MOVD      XMM0, [EAX]
+        MOVD      XMM2, [EDX]
+        PUNPCKLBW XMM0, XMM4
+        PUNPCKLBW XMM2, XMM4
+        MOVDQA    XMM1, XMM0
+        PSHUFLW   XMM1, XMM1, $FF
+        PMULLW    XMM0, XMM1
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM1
+        PMULLW    XMM2, XMM3
+        PADDW     XMM0, XMM2
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM4
+        MOVD      [EDX], XMM0
+        ADD       EAX, 4
+        ADD       EDX, 4
+        DEC       ECX
+        JNZ       @Loop1
+
+@Done:
+
+{$elseif defined(TARGET_x64)}
+
+        // RCX <- Src, RDX <- Dst, R8D <- Count
+
+        TEST      R8D, R8D
+        JLE       @Done
+
+        MOV       R9D, R8D
+        SHR       R9D, 2                // Count div 4
+        JZ        @TailCheck            // Count < 4: skip main loop entirely
+
+        PXOR      XMM4, XMM4
+
+@Loop4:
+        MOVDQU    XMM0, [RCX]
+        MOVDQU    XMM2, [RDX]
+
+        MOVDQA    XMM1, XMM0
+        PUNPCKLBW XMM0, XMM4
+        PUNPCKHBW XMM1, XMM4
+
+        MOVDQA    XMM3, XMM2
+        PUNPCKLBW XMM2, XMM4
+        PUNPCKHBW XMM3, XMM4
+
+        MOVDQA    XMM4, XMM0
+        PSHUFLW   XMM4, XMM4, $FF
+        PSHUFHW   XMM4, XMM4, $FF
+        PMULLW    XMM0, XMM4
+
+{$IFNDEF FPC}
+        MOVDQA    XMM5, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+{$ELSE}
+        MOVDQA    XMM5, DQWORD PTR [RIP+SSE_00FF00FF_ALIGNED]
+{$ENDIF}
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM2, XMM5
+
+        PADDW     XMM0, XMM2
+{$IFNDEF FPC}
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+{$ELSE}
+        PADDW     XMM0, DQWORD PTR [RIP+SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [RIP+SSE_01010101_ALIGNED]
+{$ENDIF}
+
+        MOVDQA    XMM4, XMM1
+        PSHUFLW   XMM4, XMM4, $FF
+        PSHUFHW   XMM4, XMM4, $FF
+        PMULLW    XMM1, XMM4
+
+{$IFNDEF FPC}
+        MOVDQA    XMM5, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+{$ELSE}
+        MOVDQA    XMM5, DQWORD PTR [RIP+SSE_00FF00FF_ALIGNED]
+{$ENDIF}
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM3, XMM5
+
+        PADDW     XMM1, XMM3
+{$IFNDEF FPC}
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM1, DQWORD PTR [SSE_01010101_ALIGNED]
+{$ELSE}
+        PADDW     XMM1, DQWORD PTR [RIP+SSE_00800080_ALIGNED]
+        PMULHUW   XMM1, DQWORD PTR [RIP+SSE_01010101_ALIGNED]
+{$ENDIF}
+
+        PACKUSWB  XMM0, XMM1
+        MOVDQU    [RDX], XMM0
+
+        ADD       RCX, 16
+        ADD       RDX, 16
+
+        PXOR      XMM4, XMM4
+        DEC       R9D
+        JNZ       @Loop4
+
+@TailCheck:
+        AND       R8D, 3                // Count mod 4, remainder 0-3
+        JZ        @Done
+
+        PXOR      XMM4, XMM4
+
+// ---- shared tail: 1 pixel per iteration ----
+// entered either directly (Count < 4) or as remainder after the main loop
+@Loop1:
+        MOVD      XMM0, DWORD PTR [RCX]
+        MOVD      XMM2, DWORD PTR [RDX]
+
+        PUNPCKLBW XMM0, XMM4
+        PUNPCKLBW XMM2, XMM4
+
+        MOVDQA    XMM1, XMM0
+        PSHUFLW   XMM1, XMM1, $FF
+        PMULLW    XMM0, XMM1
+
+{$IFNDEF FPC}
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+{$ELSE}
+        MOVDQA    XMM3, DQWORD PTR [RIP+SSE_00FF00FF_ALIGNED]
+{$ENDIF}
+        PSUBW     XMM3, XMM1
+        PMULLW    XMM2, XMM3
+
+        PADDW     XMM0, XMM2
+{$IFNDEF FPC}
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+{$ELSE}
+        PADDW     XMM0, DQWORD PTR [RIP+SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [RIP+SSE_01010101_ALIGNED]
+{$ENDIF}
+
+        PACKUSWB  XMM0, XMM4
+        MOVD      DWORD PTR [RDX], XMM0
+
+        ADD       RCX, 4
+        ADD       RDX, 4
+        DEC       R8D
+        JNZ       @Loop1
+
+@Done:
+
+{$ifend}
+end;
+
+procedure BlendLine_SSE41_Sanyin(Src, Dst: PColor32; Count: Integer); {$IFDEF FPC} assembler; nostackframe; {$ENDIF}
+asm
+{$if defined(TARGET_x86)}
+        // EAX <- Src, EDX <- Dst, ECX <- Count
+        TEST      ECX, ECX
+        JLE       @End
+
+        CMP       ECX, 4
+        JL        @TailLoop             // Count < 4: skip main loop entirely
+
+        PUSH      ECX                   // Save Count value
+        SHR       ECX, 2                // Count div 4
+
+@Loop4:
+// Pixels 0 and 1
+        PMOVZXBW  XMM0, QWORD PTR [EAX]
+        MOVDQA    XMM2, XMM0
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED] // Src alphas: 00 a1 00 a1 00 a1 00 a1 00 a0 00 a0 00 a0 00 a0
+        PMOVZXBW  XMM1, QWORD PTR [EDX]
+        PMULLW    XMM0, XMM2
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM2
+        PMULLW    XMM1, XMM3
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+// Pixels 2 and 3
+        PMOVZXBW  XMM1, QWORD PTR [EAX + 8]
+        MOVDQA    XMM2, XMM1
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED]
+        PMULLW    XMM1, XMM2
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM2
+        PMOVZXBW  XMM2, QWORD PTR [EDX + 8]
+        PMULLW    XMM2, XMM3
+        PADDW     XMM1, XMM2
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM1, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM1
+        MOVDQU    [EDX], XMM0
+        ADD       EAX, 16
+        ADD       EDX, 16
+        DEC       ECX
+        JNZ       @Loop4
+
+// Remainder
+        POP       ECX
+        AND       ECX, 3
+        JZ        @End
+
+// Count < 4 or remainder after the main loop
+@TailLoop:
+        MOVD      XMM0, DWORD PTR [EAX]
+        PMOVZXBW  XMM0, XMM0
+        MOVDQA    XMM2, XMM0
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED]
+        PMULLW    XMM0, XMM2
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM3, XMM2
+        MOVD      XMM1, DWORD PTR [EDX]
+        PMOVZXBW  XMM1, XMM1
+        PMULLW    XMM1, XMM3
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PACKUSWB  XMM0, XMM0
+        MOVD      DWORD PTR [EDX], XMM0
+        ADD       EAX, 4
+        ADD       EDX, 4
+        DEC       ECX
+        JNZ       @TailLoop
+
+@End:
+{$elseif defined(TARGET_x64)}
+
+// RCX <- Src, RDX <- Dst, R8D <- Count
+
+        TEST      R8D, R8D
+        JLE       @Done
+
+        CMP       R8D, 4
+        JL        @TailLoop1            // Count < 4: skip main loop
+
+        MOV       R9D, R8D
+        SHR       R9D, 2                // Count div 4
+
+@Loop4:
+// Pixels 0 and 1
+        PMOVZXBW  XMM0, QWORD PTR [RCX]
+        MOVDQA    XMM2, XMM0
+{$IFNDEF FPC}
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED] // Alphas (p0, p1): 00 a1 00 a1 00 a1 00 a1 00 a0 00 a0 00 a0 00 a0
+{$ELSE}
+        PSHUFB    XMM2, DQWORD PTR [RIP + SSE_PSHUFB_ALPHA_WORD_MASK]
+{$ENDIF}
+        PMOVZXBW  XMM1, QWORD PTR [RDX]
+        PMULLW    XMM0, XMM2                   // Src * Alpha
+{$IFNDEF FPC}
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+{$ELSE}
+        MOVDQA    XMM3, DQWORD PTR [RIP + SSE_00FF00FF_ALIGNED]
+{$ENDIF}
+        PSUBW     XMM3, XMM2                   // InvAlpha = 255 - Alpha
+        PMULLW    XMM1, XMM3                   // Dst * InvAlpha
+        PADDW     XMM0, XMM1
+{$IFNDEF FPC}
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+{$ELSE}
+        PADDW     XMM0, DQWORD PTR [RIP + SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [RIP + SSE_01010101_ALIGNED]
+{$ENDIF}
+// Pixels 2 and 3
+        PMOVZXBW  XMM1, QWORD PTR [RCX + 8]
+        MOVDQA    XMM2, XMM1
+{$IFNDEF FPC}
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED]
+{$ELSE}
+        PSHUFB    XMM2, DQWORD PTR [RIP + SSE_PSHUFB_ALPHA_WORD_MASK]
+{$ENDIF}
+        PMULLW    XMM1, XMM2
+{$IFNDEF FPC}
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+{$ELSE}
+        MOVDQA    XMM3, DQWORD PTR [RIP + SSE_00FF00FF_ALIGNED]
+{$ENDIF}
+        PSUBW     XMM3, XMM2
+        PMOVZXBW  XMM2, QWORD PTR [RDX + 8]
+        PMULLW    XMM2, XMM3
+        PADDW     XMM1, XMM2
+{$IFNDEF FPC}
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM1, DQWORD PTR [SSE_01010101_ALIGNED]
+{$ELSE}
+        PADDW     XMM1, DQWORD PTR [RIP + SSE_00800080_ALIGNED]
+        PMULHUW   XMM1, DQWORD PTR [RIP + SSE_01010101_ALIGNED]
+{$ENDIF}
+        PACKUSWB  XMM0, XMM1
+        MOVDQU    [RDX], XMM0
+
+        ADD       RCX, 16
+        ADD       RDX, 16
+        DEC       R9D
+        JNZ       @Loop4
+
+        AND       R8D, 3                // Count mod 4, remainder 0-3
+        JZ        @Done
+
+// 1 pixel per iteration
+@TailLoop1:
+        MOVD      XMM0, DWORD PTR [RCX]
+        PMOVZXBW  XMM0, XMM0
+        MOVDQA    XMM2, XMM0
+{$IFNDEF FPC}
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_ALPHA_WORD_MASK_ALIGNED]
+{$ELSE}
+        PSHUFB    XMM2, DQWORD PTR [RIP + SSE_PSHUFB_ALPHA_WORD_MASK]
+{$ENDIF}
+        MOVD      XMM1, DWORD PTR [RDX]
+        PMOVZXBW  XMM1, XMM1
+        PMULLW    XMM0, XMM2
+{$IFNDEF FPC}
+        MOVDQA    XMM3, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+{$ELSE}
+        MOVDQA    XMM3, DQWORD PTR [RIP + SSE_00FF00FF_ALIGNED]
+{$ENDIF}
+        PSUBW     XMM3, XMM2
+        PMULLW    XMM1, XMM3
+        PADDW     XMM0, XMM1
+{$IFNDEF FPC}
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+{$ELSE}
+        PADDW     XMM0, DQWORD PTR [RIP + SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [RIP + SSE_01010101_ALIGNED]
+{$ENDIF}
+        PACKUSWB  XMM0, XMM0
+        MOVD      DWORD PTR [RDX], XMM0
+        ADD       RCX, 4
+        ADD       RDX, 4
+        DEC       R8D
+        JNZ       @TailLoop1
+
+@Done:
+{$ifend}
+end;
+
+
 
 //------------------------------------------------------------------------------
 // BlendMems
@@ -1492,6 +2059,7 @@ asm
 
 {$ifend}
 end;
+
 
 
 //------------------------------------------------------------------------------
@@ -2411,6 +2979,536 @@ asm
 {$ifend}
 end;
 
+  // Errors:
+  // Tolerance 0: 28.9 %
+  // Tolerance 1: 0.6 %
+function MergeReg_SSE41_Sanyin(F, B: TColor32): TColor32;
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = B
+  // Result -> EAX
+
+        TEST      EAX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, result = background
+        CMP       EAX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, result = foreground
+        TEST      EDX, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, result = foreground
+
+        MOVD      XMM0, EAX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, EDX        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PMOVZXBW  XMM0, XMM0       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PMOVZXBW  XMM1, XMM1       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+        MOV       ECX, EAX
+        SHR       ECX, 24          // ECX <- Fa
+        SHR       EAX, 24          // EAX <- Fa
+        SHR       EDX, 24          // EDX <- Ba
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       EDX, 255         // EDX <- (255 - Ba)
+        IMUL      EAX, EDX         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       EDX, EAX
+        SHR       EDX, 8
+        ADD       EAX, EDX
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOVD      XMM4, EAX        // XMM4 <- stash Ra
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       EAX, 8
+        ADD       EAX, ECX         // EAX = Ra * 256 + Fa
+        LEA       EDX, [DivMul255Table]
+        MOVZX     EAX, BYTE PTR [EDX + EAX]   // EAX <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, EAX
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]       // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PEXTRW    EAX, XMM4, 0     // EAX <- Ra
+        PINSRW    XMM0, EAX, 3
+        PXOR      XMM2, XMM2
+        PACKUSWB  XMM0, XMM2
+        MOVD      EAX, XMM0
+        RET
+
+
+@ReturnB:
+        MOV       EAX, EDX
+@ReturnF:
+        // EAX already = F
+@Exit:
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // EDX = B
+  // Result -> EAX
+
+        TEST      ECX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, result = background
+        CMP       ECX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, result = foreground
+        TEST      EDX, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, result = foreground
+
+        MOV       R9D, ECX
+        SHR       R9D, 24          // R9D <- Fa
+        MOV       R8D, EDX
+        SHR       R8D, 24          // R8D <- Ba
+
+        MOVD      XMM0, ECX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, EDX        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PMOVZXBW  XMM0, XMM0       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PMOVZXBW  XMM1, XMM1       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        MOV       EAX, R9D         // EAX <- Fa
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       R8D, 255         // R8D <- (255 - Ba)
+        IMUL      EAX, R8D         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       R8D, EAX
+        SHR       R8D, 8
+        ADD       EAX, R8D
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOV       R11D, EAX        // R11D <- Ra (save)
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       RAX, 8
+        ADD       RAX, R9          // RAX = Ra * 256 + Fa
+        LEA       R10, [DivMul255Table]
+        MOVZX     R10D, BYTE PTR [R10 + RAX] // R10D <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, R10D
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]//XMM2       // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PINSRW    XMM0, R11D, 3    // XMM0.word[3] <- Ra
+        PXOR      XMM2, XMM2
+        PACKUSWB  XMM0, XMM2
+        MOVD      EAX, XMM0        // Result color in EAX
+        RET
+@ReturnB:
+        MOV       EAX, EDX
+        RET
+@ReturnF:
+        MOV       EAX, ECX
+@Exit:
+{$ifend}
+end;
+
+  // Errors:
+  // Tolerance 0: 28.9 %
+  // Tolerance 1: 0.6 %
+function MergeReg_SSE2_Sanyin(F, B: TColor32): TColor32;
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = B
+  // Result -> EAX
+
+        TEST      EAX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, result = background
+        CMP       EAX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, result = foreground
+        TEST      EDX, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, result = foreground
+
+        MOVD      XMM0, EAX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, EDX        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PXOR      XMM2, XMM2       // XMM2 <- zero (used for both unpacks and final pack)
+        PUNPCKLBW XMM0, XMM2       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PUNPCKLBW XMM1, XMM2       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+
+        MOV       ECX, EAX
+        SHR       ECX, 24          // ECX <- Fa
+        SHR       EAX, 24          // EAX <- Fa
+        SHR       EDX, 24          // EDX <- Ba
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       EDX, 255         // EDX <- (255 - Ba)
+        IMUL      EAX, EDX         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       EDX, EAX
+        SHR       EDX, 8
+        ADD       EAX, EDX
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOVD      XMM4, EAX        // XMM4 <- stash Ra
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       EAX, 8
+        ADD       EAX, ECX         // EAX = Ra * 256 + Fa
+        LEA       EDX, [DivMul255Table]
+        MOVZX     EAX, BYTE PTR [EDX + EAX]   // EAX <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, EAX
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]       // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PEXTRW    EAX, XMM4, 0     // EAX <- Ra
+        PINSRW    XMM0, EAX, 3
+        PACKUSWB  XMM0, XMM2       // XMM2 still zero from unpack step above
+        MOVD      EAX, XMM0
+        RET
+@ReturnB:
+        MOV       EAX, EDX
+@ReturnF:
+        // EAX already = F
+@Exit:
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // EDX = B
+  // Result -> EAX
+
+        TEST      ECX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, result = background
+        CMP       ECX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, result = foreground
+        TEST      EDX, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, result = foreground
+
+        MOV       R9D, ECX
+        SHR       R9D, 24          // R9D <- Fa
+        MOV       R8D, EDX
+        SHR       R8D, 24          // R8D <- Ba
+
+        MOVD      XMM0, ECX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, EDX        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PXOR      XMM2, XMM2       // XMM2 <- zero (used for both unpacks and final pack)
+        PUNPCKLBW XMM0, XMM2       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PUNPCKLBW XMM1, XMM2       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        MOV       EAX, R9D         // EAX <- Fa
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       R8D, 255         // R8D <- (255 - Ba)
+        IMUL      EAX, R8D         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       R8D, EAX
+        SHR       R8D, 8
+        ADD       EAX, R8D
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOV       R11D, EAX        // R11D <- Ra (save)
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       RAX, 8
+        ADD       RAX, R9          // RAX = Ra * 256 + Fa
+        LEA       R10, [DivMul255Table]
+        MOVZX     R10D, BYTE PTR [R10 + RAX] // R10D <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, R10D
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]//XMM2       // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PINSRW    XMM0, R11D, 3    // XMM0.word[3] <- Ra
+        PACKUSWB  XMM0, XMM2       // XMM2 still zero from unpack step above
+        MOVD      EAX, XMM0        // Result color in EAX
+        RET
+
+@ReturnB:
+        MOV       EAX, EDX
+        RET
+@ReturnF:
+        MOV       EAX, ECX
+@Exit:
+{$ifend}
+end;
+
+  // Errors:
+  // Tolerance 0: 0.02 %
+  // Tolerance 1: 0 %
+function MergeReg_SSE41_Float_Sanyin(F, B: TColor32): TColor32;
+const
+  C255  : Single = 255.0;
+  C1_255: Single = 1.0 / 255.0;
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = B
+  // Result -> EAX
+
+        TEST      EAX, $FF000000
+        JZ        @ReturnB
+        CMP       EAX, $FF000000
+        JNC       @ReturnF
+        TEST      EDX, $FF000000
+        JZ        @ReturnF
+
+        MOVD      XMM0, EAX
+        MOVD      XMM1, EDX
+        PMOVZXBD  XMM0, XMM0
+        PMOVZXBD  XMM1, XMM1
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        SHR       EAX, 24           // EAX <- Fa (int)
+        SHR       EDX, 24           // EDX <- Ba (int)
+
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, EAX
+        CVTSI2SS  XMM3, EDX
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]   // faster than DIVSS
+        ADDSS     XMM4, XMM2
+
+        // Wa = Fa / Ra
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1
+
+        INSERTPS  XMM0, XMM4, $30   // alpha <- Ra
+
+        CVTPS2DQ  XMM0, XMM0
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+        MOVD      EAX, XMM0
+
+        JMP       @Exit
+
+@ReturnB:
+        MOV       EAX, EDX
+        JMP       @Exit
+@ReturnF:
+        // EAX already = F
+@Exit:
+
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // EDX = B
+  // Result -> EAX
+
+        TEST      ECX, $FF000000
+        JZ        @ReturnB
+        CMP       ECX, $FF000000
+        JNC       @ReturnF
+        TEST      EDX, $FF000000
+        JZ        @ReturnF
+
+        MOVD      XMM0, ECX
+        MOVD      XMM1, EDX
+        PMOVZXBD  XMM0, XMM0
+        PMOVZXBD  XMM1, XMM1
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        SHR       ECX, 24           // ECX <- Fa (int)
+        SHR       EDX, 24           // EDX <- Ba (int)
+
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, ECX
+        CVTSI2SS  XMM3, EDX
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]
+        ADDSS     XMM4, XMM2
+
+        // Wa = Fa / Ra
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1
+
+        INSERTPS  XMM0, XMM4, $30
+
+        CVTPS2DQ  XMM0, XMM0
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+        MOVD      EAX, XMM0
+        JMP       @Exit
+
+@ReturnB:
+        MOV       EAX, EDX
+        JMP       @Exit
+@ReturnF:
+        MOV       EAX, ECX
+@Exit:
+{$ifend}
+end;
+
+  // Errors:
+  // Tolerance 0: 0.02 %
+  // Tolerance 1: 0 %
+function MergeReg_SSE2_Float_Sanyin(F, B: TColor32): TColor32;
+const
+  C255  : Single = 255.0;
+  C1_255: Single = 1.0 / 255.0;
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = B
+  // Result -> EAX
+        TEST      EAX, $FF000000
+        JZ        @ReturnB
+        CMP       EAX, $FF000000
+        JNC       @ReturnF
+        TEST      EDX, $FF000000
+        JZ        @ReturnF
+
+        MOVD      XMM0, EAX
+        MOVD      XMM1, EDX
+        PXOR      XMM5, XMM5
+        PUNPCKLBW XMM0, XMM5
+        PUNPCKLBW XMM1, XMM5
+        PUNPCKLWD XMM0, XMM5
+        PUNPCKLWD XMM1, XMM5
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        SHR       EAX, 24
+        SHR       EDX, 24
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, EAX
+        CVTSI2SS  XMM3, EDX
+
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]
+        ADDSS     XMM4, XMM2
+
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1
+
+        SHUFPS    XMM4, XMM4, 0
+        MOVAPS    XMM2, DQWORD PTR [SSE_AlphaLaneMask_ALIGNED]
+        ANDPS     XMM4, XMM2
+        ANDNPS    XMM2, XMM0
+        ORPS      XMM2, XMM4
+        CVTPS2DQ  XMM0, XMM2
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+        MOVD      EAX, XMM0
+        JMP       @Exit
+
+@ReturnB:
+        MOV       EAX, EDX
+        JMP       @Exit
+@ReturnF:
+@Exit:
+
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // EDX = B
+  // Result -> EAX
+        TEST      ECX, $FF000000
+        JZ        @ReturnB
+        CMP       ECX, $FF000000
+        JNC       @ReturnF
+        TEST      EDX, $FF000000
+        JZ        @ReturnF
+
+        MOVD      XMM0, ECX
+        MOVD      XMM1, EDX
+        PXOR      XMM5, XMM5
+        PUNPCKLBW XMM0, XMM5
+        PUNPCKLBW XMM1, XMM5
+        PUNPCKLWD XMM0, XMM5
+        PUNPCKLWD XMM1, XMM5
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        SHR       ECX, 24
+        SHR       EDX, 24
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, ECX
+        CVTSI2SS  XMM3, EDX
+
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]
+        ADDSS     XMM4, XMM2
+
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1
+
+        SHUFPS    XMM4, XMM4, 0
+        MOVAPS    XMM2, DQWORD PTR [SSE_AlphaLaneMask_ALIGNED]
+        ANDPS     XMM4, XMM2
+        ANDNPS    XMM2, XMM0
+        ORPS      XMM2, XMM4
+        CVTPS2DQ  XMM0, XMM2
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+        MOVD      EAX, XMM0
+        JMP       @Exit
+
+@ReturnB:
+        MOV       EAX, EDX
+        JMP       @Exit
+@ReturnF:
+        MOV       EAX, ECX
+@Exit:
+{$ifend}
+end;
+
 
 //------------------------------------------------------------------------------
 // MergeReg
@@ -2778,6 +3876,562 @@ asm
 
 end;
 {$ifend}
+
+//------------------------------------------------------------------------------
+// MergeMem
+//------------------------------------------------------------------------------
+{$if not defined(FPC)}
+procedure MergeMem_SSE41_Sanyin(F: TColor32; var B: TColor32);
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = @B (pointer)
+
+        PUSH      EBX
+        MOV       EBX, [EDX]       // EBX <- B (value)
+
+        TEST      EAX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, B stays unchanged
+        CMP       EAX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, B := F
+        TEST      EBX, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, B := F
+
+        MOVD      XMM0, EAX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, EBX        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PMOVZXBW  XMM0, XMM0       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PMOVZXBW  XMM1, XMM1       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+        MOV       ECX, EAX
+        SHR       ECX, 24          // ECX <- Fa
+        SHR       EAX, 24          // EAX <- Fa
+        SHR       EBX, 24          // EBX <- Ba
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       EBX, 255         // EBX <- (255 - Ba)
+        IMUL      EAX, EBX         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       EBX, EAX
+        SHR       EBX, 8
+        ADD       EAX, EBX
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOVD      XMM4, EAX        // XMM4 <- stash Ra
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       EAX, 8
+        ADD       EAX, ECX         // EAX = Ra * 256 + Fa
+        LEA       EBX, [DivMul255Table]
+        MOVZX     EAX, BYTE PTR [EBX + EAX]   // EAX <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, EAX
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]  // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PEXTRW    EAX, XMM4, 0     // EAX <- Ra
+        PINSRW    XMM0, EAX, 3
+        PXOR      XMM2, XMM2
+        PACKUSWB  XMM0, XMM2
+        MOVD      DWORD PTR [EDX], XMM0
+
+        POP       EBX
+        RET
+
+@ReturnB:
+        POP       EBX
+        RET
+@ReturnF:
+        MOV       DWORD PTR [EDX], EAX    // B := F
+        POP       EBX
+        RET
+
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // RDX = @B (pointer)
+
+        MOV       R8D, DWORD PTR [RDX]    // R8D <- B (value)
+
+        TEST      ECX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, B stays unchanged
+        CMP       ECX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, B := F
+        TEST      R8D, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, B := F
+
+        MOV       R9D, ECX
+        SHR       R9D, 24          // R9D <- Fa
+
+        MOVD      XMM0, ECX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, R8D        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PMOVZXBW  XMM0, XMM0       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PMOVZXBW  XMM1, XMM1       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+        SHR       R8D, 24          // R8D <- Ba
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        MOV       EAX, R9D         // EAX <- Fa
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       R8D, 255         // R8D <- (255 - Ba)
+        IMUL      EAX, R8D         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       R8D, EAX
+        SHR       R8D, 8
+        ADD       EAX, R8D
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOV       R11D, EAX        // R11D <- Ra (save)
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       RAX, 8
+        ADD       RAX, R9          // RAX = Ra * 256 + Fa
+        LEA       R10, [DivMul255Table]
+        MOVZX     R10D, BYTE PTR [R10 + RAX] // R10D <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, R10D
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]   // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PINSRW    XMM0, R11D, 3    // XMM0.word[3] <- Ra
+        PXOR      XMM2, XMM2
+        PACKUSWB  XMM0, XMM2
+        MOVD      DWORD PTR [RDX], XMM0
+        RET
+
+@ReturnB:
+        RET
+@ReturnF:
+        MOV       DWORD PTR [RDX], ECX    // B := F
+{$ifend}
+end;
+
+procedure MergeMem_SSE41_Float_Sanyin(F: TColor32; var B: TColor32);
+const
+  C255  : Single = 255.0;
+  C1_255: Single = 1.0 / 255.0;
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = @B (pointer)
+
+        PUSH      EBX
+        MOV       EBX, [EDX]       // EBX <- B (value)
+
+        TEST      EAX, $FF000000
+        JZ        @ReturnB
+        CMP       EAX, $FF000000
+        JNC       @ReturnF
+        TEST      EBX, $FF000000
+        JZ        @ReturnF
+
+        MOVD      XMM0, EAX
+        MOVD      XMM1, EBX
+        PMOVZXBD  XMM0, XMM0
+        PMOVZXBD  XMM1, XMM1
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        MOV       ECX, EAX
+        SHR       ECX, 24           // ECX <- Fa (int)
+        SHR       EBX, 24           // EBX <- Ba (int)
+
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, ECX
+        CVTSI2SS  XMM3, EBX
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]
+        ADDSS     XMM4, XMM2
+
+        // Wa = Fa / Ra
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1
+
+        INSERTPS  XMM0, XMM4, $30   // alpha <- Ra
+
+        CVTPS2DQ  XMM0, XMM0
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+        MOVD      DWORD PTR [EDX], XMM0
+
+        POP       EBX
+        RET
+
+@ReturnB:
+        POP       EBX
+        RET
+@ReturnF:
+        MOV       DWORD PTR [EDX], EAX    // B := F
+        POP       EBX
+        RET
+
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // RDX = @B (pointer)
+
+        MOV       R8D, DWORD PTR [RDX]    // R8D <- B (value)
+
+        TEST      ECX, $FF000000
+        JZ        @ReturnB
+        CMP       ECX, $FF000000
+        JNC       @ReturnF
+        TEST      R8D, $FF000000
+        JZ        @ReturnF
+
+        MOVD      XMM0, ECX
+        MOVD      XMM1, R8D
+        PMOVZXBD  XMM0, XMM0
+        PMOVZXBD  XMM1, XMM1
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        MOV       R9D, ECX
+        SHR       R9D, 24           // R9D <- Fa (int)
+        SHR       R8D, 24           // R8D <- Ba (int)
+
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, R9D
+        CVTSI2SS  XMM3, R8D
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]
+        ADDSS     XMM4, XMM2
+
+        // Wa = Fa / Ra
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1
+
+        INSERTPS  XMM0, XMM4, $30
+
+        CVTPS2DQ  XMM0, XMM0
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+        MOVD      DWORD PTR [RDX], XMM0
+        RET
+
+@ReturnB:
+        RET
+@ReturnF:
+        MOV       DWORD PTR [RDX], ECX    // B := F
+{$ifend}
+end;
+{$ifend}
+
+//------------------------------------------------------------------------------
+// MergeMem_SSE2_Sanyin
+//------------------------------------------------------------------------------
+procedure MergeMem_SSE2_Sanyin(F: TColor32; var B: TColor32);
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = @B (pointer)
+
+        PUSH      EBX
+        MOV       EBX, [EDX]       // EBX <- B (value)
+
+        TEST      EAX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, B stays unchanged
+        CMP       EAX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, B := F
+        TEST      EBX, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, B := F
+
+        PXOR      XMM2, XMM2       // XMM2 <- zero (used for unpack + final pack)
+        MOVD      XMM0, EAX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, EBX        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PUNPCKLBW XMM0, XMM2       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PUNPCKLBW XMM1, XMM2       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+        MOV       ECX, EAX
+        SHR       ECX, 24          // ECX <- Fa
+        SHR       EAX, 24          // EAX <- Fa
+        SHR       EBX, 24          // EBX <- Ba
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       EBX, 255         // EBX <- (255 - Ba)
+        IMUL      EAX, EBX         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       EBX, EAX
+        SHR       EBX, 8
+        ADD       EAX, EBX
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOVD      XMM4, EAX        // XMM4 <- stash Ra
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       EAX, 8
+        ADD       EAX, ECX         // EAX = Ra * 256 + Fa
+        LEA       EBX, [DivMul255Table]
+        MOVZX     EAX, BYTE PTR [EBX + EAX]   // EAX <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, EAX
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]  // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PEXTRW    EAX, XMM4, 0     // EAX <- Ra
+        PINSRW    XMM0, EAX, 3
+        PACKUSWB  XMM0, XMM2       // XMM2 is still 0
+        MOVD      DWORD PTR [EDX], XMM0
+
+        POP       EBX
+        RET
+
+@ReturnB:
+        POP       EBX
+        RET
+@ReturnF:
+        MOV       DWORD PTR [EDX], EAX    // B := F
+        POP       EBX
+        RET
+
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // RDX = @B (pointer)
+
+        MOV       R8D, DWORD PTR [RDX]    // R8D <- B (value)
+
+        TEST      ECX, $FF000000   // Foreground completely transparent?
+        JZ        @ReturnB         // Yes, B stays unchanged
+        CMP       ECX, $FF000000   // Foreground completely opaque?
+        JNC       @ReturnF         // Yes, B := F
+        TEST      R8D, $FF000000   // Background completely transparent?
+        JZ        @ReturnF         // Yes, B := F
+
+        MOV       R9D, ECX
+        SHR       R9D, 24          // R9D <- Fa
+
+        PXOR      XMM2, XMM2       // XMM2 <- zero (used for unpack + final pack)
+        MOVD      XMM0, ECX        // XMM0 <- [0 0 0 0 | Fa Fr Fg Fb]
+        MOVD      XMM1, R8D        // XMM1 <- [0 0 0 0 | Ba Br Bg Bb]
+        PUNPCKLBW XMM0, XMM2       // XMM0 <- [00Fa 00Fr 00Fg 00Fb]
+        PUNPCKLBW XMM1, XMM2       // XMM1 <- [00Ba 00Br 00Bg 00Bb]
+
+        SHR       R8D, 24          // R8D <- Ba
+
+        // Calculate Result Alpha: Ra = 255 - Round((255 - Fa) * (255 - Ba) / 255)
+        MOV       EAX, R9D         // EAX <- Fa
+        XOR       EAX, 255         // EAX <- (255 - Fa)
+        XOR       R8D, 255         // R8D <- (255 - Ba)
+        IMUL      EAX, R8D         // EAX <- (255 - Fa) * (255 - Ba) = y
+
+        // div 255 trick: Ra = 255 - Round( y / 255 )
+        ADD       EAX, 128
+        MOV       R8D, EAX
+        SHR       R8D, 8
+        ADD       EAX, R8D
+        SHR       EAX, 8           // EAX <- Round(y / 255)
+        XOR       EAX, 255         // EAX <- Ra (Result Alpha)
+        MOV       R11D, EAX        // R11D <- Ra (save)
+
+        // Calculate Weight: Wa = Round(Fa * 255 / Ra)
+        SHL       RAX, 8
+        ADD       RAX, R9          // RAX = Ra * 256 + Fa
+        LEA       R10, [DivMul255Table]
+        MOVZX     R10D, BYTE PTR [R10 + RAX] // R10D <- Wa
+
+        // Result Color: Rc = Bc + Wa * (Fc - Bc) / 255
+        MOVD      XMM3, R10D
+        PSHUFLW   XMM3, XMM3, $00  // XMM3 <- [Wa Wa Wa Wa]
+        PSUBW     XMM0, XMM1       // XMM0 <- [Fa-Ba Fr-Br Fg-Bg Fb-Bb]
+        PMULLW    XMM0, XMM3       // XMM0 <- Wa * (Fc - Bc)
+        PSLLW     XMM1, 8          // XMM1 <- B * 256
+        PADDW     XMM1, DQWORD PTR [SSE_00800080_ALIGNED]  // XMM1 <- B * 256 + 128
+        PADDW     XMM0, XMM1       // XMM0 <- Wa * (Fc - Bc) + B * 256 + 128
+        PSRLW     XMM0, 8
+
+        PINSRW    XMM0, R11D, 3    // XMM0.word[3] <- Ra
+        PACKUSWB  XMM0, XMM2       // XMM2 is still 0
+        MOVD      DWORD PTR [RDX], XMM0
+        RET
+
+@ReturnB:
+        RET
+@ReturnF:
+        MOV       DWORD PTR [RDX], ECX    // B := F
+{$ifend}
+end;
+
+procedure MergeMem_SSE2_Float_Sanyin(F: TColor32; var B: TColor32);
+const
+  C255  : Single = 255.0;
+  C1_255: Single = 1.0 / 255.0;
+asm
+{$if defined(TARGET_x86)}
+  // EAX = F
+  // EDX = @B (pointer)
+
+        PUSH      EBX
+        MOV       EBX, [EDX]       // EBX <- B (value)
+
+        TEST      EAX, $FF000000
+        JZ        @ReturnB
+        CMP       EAX, $FF000000
+        JNC       @ReturnF
+        TEST      EBX, $FF000000
+        JZ        @ReturnF
+
+        PXOR      XMM6, XMM6       // XMM6 <- zero
+        MOVD      XMM0, EAX
+        MOVD      XMM1, EBX
+        PUNPCKLBW XMM0, XMM6       // bytes -> words
+        PUNPCKLWD XMM0, XMM6       // words -> dwords
+        PUNPCKLBW XMM1, XMM6
+        PUNPCKLWD XMM1, XMM6
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        MOV       ECX, EAX
+        SHR       ECX, 24           // ECX <- Fa (int)
+        SHR       EBX, 24           // EBX <- Ba (int)
+
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, ECX
+        CVTSI2SS  XMM3, EBX
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]
+        ADDSS     XMM4, XMM2       // XMM4 <- Ra (float)
+
+        // Wa = Fa / Ra
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1       // XMM0 <- final float color
+
+        CVTSS2SI  EAX, XMM4        // EAX <- Ra
+
+        CVTPS2DQ  XMM0, XMM0
+        PACKSSDW  XMM0, XMM0
+        PINSRW    XMM0, EAX, 3
+        PACKUSWB  XMM0, XMM0
+        MOVD      DWORD PTR [EDX], XMM0
+
+        POP       EBX
+        RET
+
+@ReturnB:
+        POP       EBX
+        RET
+@ReturnF:
+        MOV       DWORD PTR [EDX], EAX    // B := F
+        POP       EBX
+        RET
+
+{$elseif defined(TARGET_X64)}
+  // ECX = F
+  // RDX = @B (pointer)
+
+        MOV       R8D, DWORD PTR [RDX]    // R8D <- B
+
+        TEST      ECX, $FF000000
+        JZ        @ReturnB
+        CMP       ECX, $FF000000
+        JNC       @ReturnF
+        TEST      R8D, $FF000000
+        JZ        @ReturnF
+
+        PXOR      XMM6, XMM6
+        MOVD      XMM0, ECX
+        MOVD      XMM1, R8D
+        PUNPCKLBW XMM0, XMM6
+        PUNPCKLWD XMM0, XMM6
+        PUNPCKLBW XMM1, XMM6
+        PUNPCKLWD XMM1, XMM6
+        CVTDQ2PS  XMM0, XMM0
+        CVTDQ2PS  XMM1, XMM1
+
+        MOV       R9D, ECX
+        SHR       R9D, 24           // R9D <- Fa
+        SHR       R8D, 24           // R8D <- Ba
+
+        PXOR      XMM2, XMM2
+        PXOR      XMM3, XMM3
+        CVTSI2SS  XMM2, R9D
+        CVTSI2SS  XMM3, R8D
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM4, DWORD PTR [C255]
+        SUBSS     XMM4, XMM2
+        MULSS     XMM4, XMM3
+        MULSS     XMM4, DWORD PTR [C1_255]
+        ADDSS     XMM4, XMM2       // XMM4 <- Ra (float)
+
+        // Wa = Fa / Ra
+        MOVSS     XMM5, XMM2
+        DIVSS     XMM5, XMM4
+
+        SHUFPS    XMM5, XMM5, 0
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM5
+        ADDPS     XMM0, XMM1
+
+        CVTSS2SI  EAX, XMM4        // EAX <- Ra
+
+        CVTPS2DQ  XMM0, XMM0
+        PACKSSDW  XMM0, XMM0
+        PINSRW    XMM0, EAX, 3
+        PACKUSWB  XMM0, XMM0
+        MOVD      DWORD PTR [RDX], XMM0
+        RET
+
+@ReturnB:
+        RET
+@ReturnF:
+        MOV       DWORD PTR [RDX], ECX    // B := F
+{$ifend}
+end;
+
+
 
 //------------------------------------------------------------------------------
 // MergeLine
@@ -3322,6 +4976,2533 @@ asm
 
 end;
 {$ifend}
+
+// Errors:
+// Tolerance 0: 16.8 %
+// Tolerance 1: 0.1 %
+procedure MergeLine_SSE41_Sanyin(Src, Dst: PColor32; Count: Integer);
+asm
+{$if defined(TARGET_X86)}
+  // EAX = Src
+  // EDX = Dst
+  // ECX = Count
+  // Ra = Result Alpha
+  // Wa = Weight
+        CMP       ECX, 0
+        JLE       @Exit
+        PUSH      EDI
+        PUSH      EBX
+        PUSH      ESI
+        MOV       EDI, ECX
+
+        MOVDQA    XMM0, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        MOVDQA    XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PXOR      XMM7, XMM7
+
+        CMP       EDI, 2
+        JL        @Tail
+@Loop2:
+        MOVQ      XMM2, QWORD PTR [EAX]      // F (2 pixels)
+        MOVQ      XMM3, QWORD PTR [EDX]      // B (2 pixels)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa, pixel 1
+        PSHUFHW   XMM4, XMM4, $FF            // Fa, pixel 2
+        PSHUFLW   XMM6, XMM3, $FF            // Ba, pixel 1
+        PSHUFHW   XMM6, XMM6, $FF            // Ba, pixel 2
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4                 // 255 - Fa
+        PMULLW    XMM5, XMM6                 // (255 - Fa) * Ba
+        PADDW     XMM5, XMM1                 // + 128 (round)
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]  // div 255
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                 // XMM6 = Ra (Result Alpha)
+
+        // Wa1 = DivMul255Table[Ra1, Fa1]
+        PEXTRW    ECX, XMM6, 0
+        PEXTRW    ESI, XMM4, 0
+        SHL       ECX, 8
+        ADD       ECX, ESI
+        MOVZX     ECX, BYTE PTR [DivMul255Table + ECX]
+
+        // Wa2 = DivMul255Table[Ra2, Fa2]
+        PEXTRW    EBX, XMM6, 4
+        PEXTRW    ESI, XMM4, 4
+        SHL       EBX, 8
+        ADD       EBX, ESI
+        MOVZX     EBX, BYTE PTR [DivMul255Table + EBX]
+
+        MOVD      XMM5, ECX
+        PINSRW    XMM5, EBX, 4
+        PSHUFLW   XMM5, XMM5, 0
+        PSHUFHW   XMM5, XMM5, 0              // XMM5 = Wa (both pixels)
+
+        // Result color: Round((F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0
+        PSUBW     XMM4, XMM5                 // XMM4 = InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // XMM2 = F * Wa
+        PMULLW    XMM3, XMM4                 // XMM3 = B * InvWa
+        PADDW     XMM2, XMM3                 // XMM2 = Sum = F * Wa + B * InvWa
+        PADDW     XMM2, XMM1                 // + 128 (round)
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // XMM2 = Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2                 // Result color
+        PBLENDW   XMM4, XMM6, $88            // insert exact Ra
+        PACKUSWB  XMM4, XMM7                 // words to bytes
+
+        MOVQ      QWORD PTR [EDX], XMM4      // store 2 merged pixels
+        ADD       EAX, 8
+        ADD       EDX, 8
+        SUB       EDI, 2
+        CMP       EDI, 2
+        JGE     @Loop2
+
+@Tail:
+        CMP       EDI, 1
+        JL        @ExitPop
+        MOVD      XMM2, DWORD PTR [EAX]      // F (1 pixel)
+        MOVD      XMM3, DWORD PTR [EDX]      // B (1 pixel)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa
+        PSHUFLW   XMM6, XMM3, $FF            // Ba
+
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM5, XMM6
+        PADDW     XMM5, XMM1
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                 // Ra
+
+        PEXTRW    ECX, XMM6, 0
+        PEXTRW    ESI, XMM4, 0
+        SHL       ECX, 8
+        ADD       ECX, ESI
+        MOVZX     ECX, BYTE PTR [DivMul255Table + ECX]   // Wa
+
+        MOVD      XMM5, ECX
+        PSHUFLW   XMM5, XMM5, 0
+
+        // Rc: Round((F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0
+        PSUBW     XMM4, XMM5                 // InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // F * Wa
+        PMULLW    XMM3, XMM4                 // B * InvWa
+        PADDW     XMM2, XMM3                 // Sum
+        PADDW     XMM2, XMM1                 // + 128
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2
+        PBLENDW   XMM4, XMM6, $88
+        PACKUSWB  XMM4, XMM7
+        MOVD    DWORD PTR [EDX], XMM4        // store 1 merged pixel
+@ExitPop:
+        POP       ESI
+        POP       EBX
+        POP       EDI
+@Exit:
+
+{$elseif defined(TARGET_X64)}
+  // RCX = Src (Foreground)
+  // RDX = Dst (Background)
+  // R8D = Count
+  // Ra = Result Alpha
+  // Wa = Weight
+        CMP       R8D, 0
+        JLE       @Exit
+
+        LEA       R9, DivMul255Table
+        MOVDQA    XMM0, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        MOVDQA    XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PXOR      XMM7, XMM7
+
+        CMP       R8D, 2
+        JL        @Tail
+@Loop2:
+        MOVQ      XMM2, QWORD PTR [RCX]      // F (2 pixels)
+        MOVQ      XMM3, QWORD PTR [RDX]      // B (2 pixels)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa, pixel 1
+        PSHUFHW   XMM4, XMM4, $FF            // Fa, pixel 2
+        PSHUFLW   XMM6, XMM3, $FF            // Ba, pixel 1
+        PSHUFHW   XMM6, XMM6, $FF            // Ba, pixel 2
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4                 // 255 - Fa
+        PMULLW    XMM5, XMM6                 // (255 - Fa) * Ba
+        PADDW     XMM5, XMM1                 // + 128 (round)
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]  // div 255
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                 // XMM6 = Ra (Result Alpha)
+
+        // Wa1 = DivMul255Table[Ra1, Fa1]
+        PEXTRW    EAX, XMM6, 0
+        PEXTRW    R10D, XMM4, 0
+        SHL       EAX, 8
+        ADD       EAX, R10D
+        MOVZX     EAX, BYTE PTR [R9 + RAX]
+
+        // Wa2 = DivMul255Table[Ra2, Fa2]
+        PEXTRW    R11D, XMM6, 4
+        PEXTRW    R10D, XMM4, 4
+        SHL       R11D, 8
+        ADD       R11D, R10D
+        MOVZX     R11D, BYTE PTR [R9 + R11]
+
+        MOVD      XMM5, EAX
+        PINSRW    XMM5, R11D, 4
+        PSHUFLW   XMM5, XMM5, 0
+        PSHUFHW   XMM5, XMM5, 0              // XMM5 = Wa (both pixels)
+
+        // Result color: Round( (F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0                 // 255 per word
+        PSUBW     XMM4, XMM5                 // XMM4 = InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // XMM2 = F * Wa
+        PMULLW    XMM3, XMM4                 // XMM3 = B * InvWa
+        PADDW     XMM2, XMM3                 // XMM2 = Sum = F * Wa + B * InvWa
+        PADDW     XMM2, XMM1                 // + 128 (round)
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // XMM2 = Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2                 // Result color
+        PBLENDW   XMM4, XMM6, $88            // insert exact Ra
+        PACKUSWB  XMM4, XMM7                 // words to bytes
+
+        MOVQ      QWORD PTR [RDX], XMM4      // store 2 merged pixels
+        ADD       RCX, 8
+        ADD       RDX, 8
+        SUB       R8D, 2
+        CMP       R8D, 2
+        JGE       @Loop2
+
+@Tail:
+        CMP       R8D, 1
+        JL        @Exit
+        MOVD      XMM2, DWORD PTR [RCX]      // F (1 pixel)
+        MOVD      XMM3, DWORD PTR [RDX]      // B (1 pixel)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa
+        PSHUFLW   XMM6, XMM3, $FF            // Ba
+
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM5, XMM6
+        PADDW     XMM5, XMM1
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                 // Ra
+
+        PEXTRW    EAX, XMM6, 0
+        PEXTRW    R10D, XMM4, 0
+        SHL       EAX, 8
+        ADD       EAX, R10D
+        MOVZX     EAX, BYTE PTR [R9 + RAX]     // Wa
+
+        MOVD      XMM5, EAX
+        PSHUFLW   XMM5, XMM5, 0
+
+        // Rc: Round( (F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0
+        PSUBW     XMM4, XMM5                 // InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // F * Wa
+        PMULLW    XMM3, XMM4                 // B * InvWa
+        PADDW     XMM2, XMM3                 // Sum
+        PADDW     XMM2, XMM1                 // + 128
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2
+        PBLENDW   XMM4, XMM6, $88
+        PACKUSWB  XMM4, XMM7
+        MOVD    DWORD PTR [RDX], XMM4        // store 1 merged pixel
+@Exit:
+
+{$ifend}
+end;
+
+// Errors:
+// Tolerance 0: 16.8 %
+// Tolerance 1: 0.1 %
+procedure MergeLine_SSE2_Sanyin(Src, Dst: PColor32; Count: Integer);
+asm
+{$if defined(TARGET_x86)}
+  // EAX = Src (Foreground)
+  // EDX = Dst (Background)
+  // ECX = Count
+  // Ra = Result Alpha
+  // Wa = Weight
+
+        CMP       ECX, 0
+        JLE       @Exit
+        PUSH      EDI
+        PUSH      EBX
+        PUSH      ESI
+        MOV       EDI, ECX
+
+        MOVDQA    XMM0, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        MOVDQA    XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PXOR      XMM7, XMM7
+        CMP       EDI, 2
+        JL        @Tail
+@Loop2:
+        MOVQ      XMM2, QWORD PTR [EAX]      // F (2 pixels)
+        MOVQ      XMM3, QWORD PTR [EDX]      // B (2 pixels)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa broadcast across pixel 1
+        PSHUFHW   XMM4, XMM4, $FF            // Fa broadcast for pixel 2
+        PSHUFLW   XMM6, XMM3, $FF            // Ba broadcast, pixel 1
+        PSHUFHW   XMM6, XMM6, $FF            // Ba broadcast, pixel 2
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4                 // 255 - Fa
+        PMULLW    XMM5, XMM6                 // (255 - Fa) * Ba
+        PADDW     XMM5, XMM1                 // + 128 (round)
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]  // div 255
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                 // XMM6 = Ra (Result Alpha)
+
+        // Wa1 = DivMul255Table[Ra1, Fa1]
+        PEXTRW    ECX, XMM6, 0
+        PEXTRW    ESI, XMM4, 0
+        SHL       ECX, 8
+        ADD       ECX, ESI
+        MOVZX     ECX, BYTE PTR [DivMul255Table + ECX]
+
+        // Wa2 = DivMul255Table[Ra2, Fa2]
+        PEXTRW    EBX, XMM6, 4
+        PEXTRW    ESI, XMM4, 4
+        SHL       EBX, 8
+        ADD       EBX, ESI
+        MOVZX     EBX, BYTE PTR [DivMul255Table + EBX]
+
+        MOVD      XMM5, ECX
+        PINSRW    XMM5, EBX, 4
+        PSHUFLW   XMM5, XMM5, 0
+        PSHUFHW   XMM5, XMM5, 0              // XMM5 = Wa (both pixels)
+
+        // Result color: Round( (F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0                 // 255 per word
+        PSUBW     XMM4, XMM5                 // XMM4 = InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // XMM2 = F * Wa
+        PMULLW    XMM3, XMM4                 // XMM3 = B * InvWa
+        PADDW     XMM2, XMM3                 // XMM2 = Sum = F * Wa + B * InvWa
+        PADDW     XMM2, XMM1                 // + 128 (round)
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // XMM2 = Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2                 // Result color
+
+        // SSE2 version of PBLENDW XMM4, XMM6, $88
+        MOVDQA    XMM2, XMM6
+        PAND      XMM2, DQWORD PTR [SSE_AlphaMask_ALIGNED]   // keep Ra alpha
+        MOVDQA    XMM3, DQWORD ptr [SSE_AlphaMask_ALIGNED]
+        PANDN     XMM3, XMM4                                 // keep everything except alpha
+        POR       XMM2, XMM3                                 // color from sum, alpha from Ra
+        MOVDQA    XMM4, XMM2
+
+        PACKUSWB  XMM4, XMM7                 // words to bytes
+
+        MOVQ      QWORD PTR [EDX], XMM4      // store 2 merged pixels
+        ADD       EAX, 8
+        ADD       EDX, 8
+        SUB       EDI, 2
+        CMP       EDI, 2
+        JGE       @Loop2
+
+@Tail:
+        CMP       EDI, 1
+        JL        @ExitPop
+        MOVD      XMM2, DWORD PTR [EAX]      // F (1 pixel)
+        MOVD      XMM3, DWORD PTR [EDX]      // B (1 pixel)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa
+        PSHUFLW   XMM6, XMM3, $FF            // Ba
+
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM5, XMM6
+        PADDW     XMM5, XMM1
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                                // Ra
+
+        PEXTRW    ECX, XMM6, 0
+        PEXTRW    ESI, XMM4, 0
+        SHL       ECX, 8
+        ADD       ECX, ESI
+        MOVZX     ECX, BYTE PTR [DivMul255Table + ECX]        // Wa
+
+        MOVD      XMM5, ECX
+        PSHUFLW   XMM5, XMM5, 0
+
+        // Result color: Round( (F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0
+        PSUBW     XMM4, XMM5                 // InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // F * Wa
+        PMULLW    XMM3, XMM4                 // B * InvWa
+        PADDW     XMM2, XMM3                 // Sum
+        PADDW     XMM2, XMM1                 // + 128
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2
+
+        MOVDQA    XMM2, XMM6
+        PAND      XMM2, DQWORD PTR [SSE_AlphaMask_ALIGNED]
+        MOVDQA    XMM3, DQWORD PTR [SSE_AlphaMask_ALIGNED]
+        PANDN     XMM3, XMM4
+        POR       XMM2, XMM3
+        MOVDQA    XMM4, XMM2
+
+        PACKUSWB  XMM4, XMM7
+        MOVD      DWORD PTR [EDX], XMM4      // store 1 merged pixel
+@ExitPop:
+        POP       ESI
+        POP       EBX
+        POP       EDI
+@Exit:
+{$elseif defined(TARGET_x64)}
+  // RCX = Src (Foreground)
+  // RDX = Dst (Background)
+  // R8D = Count
+  // Ra = Result Alpha
+  // Wa = Weight
+
+        CMP       R8D, 0
+        JLE       @Exit
+
+        LEA       R9, DivMul255Table
+        MOVDQA    XMM0, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        MOVDQA    XMM1, DQWORD PTR [SSE_00800080_ALIGNED]
+        PXOR      XMM7, XMM7
+
+        CMP       R8D, 2
+        JL        @Tail
+@Loop2:
+        MOVQ      XMM2, QWORD PTR [RCX]      // F (2 pixels)
+        MOVQ      XMM3, QWORD PTR [RDX]      // B (2 pixels)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa broadcast
+        PSHUFHW   XMM4, XMM4, $FF
+        PSHUFLW   XMM6, XMM3, $FF            // Ba broadcast
+        PSHUFHW   XMM6, XMM6, $FF
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM5, XMM6
+        PADDW     XMM5, XMM1
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                 // Ra
+
+        // Wa1 = DivMul255Table[Ra1, Fa1]
+        PEXTRW    EAX, XMM6, 0
+        PEXTRW    R10D, XMM4, 0
+        SHL       EAX, 8
+        ADD       EAX, R10D
+        MOVZX     EAX, BYTE PTR [R9 + RAX]
+
+        // Wa2 = DivMul255Table[Ra2, Fa2]
+        PEXTRW    R11D, XMM6, 4
+        PEXTRW    R10D, XMM4, 4
+        SHL       R11D, 8
+        ADD       R11D, R10D
+        MOVZX     R11D, BYTE PTR [R9 + R11]
+
+        MOVD      XMM5, EAX
+        PINSRW    XMM5, R11D, 4
+        PSHUFLW   XMM5, XMM5, 0
+        PSHUFHW   XMM5, XMM5, 0              // Wa, both pixels
+
+        // Result color: Round( (F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0                 // 255 per word
+        PSUBW     XMM4, XMM5                 // XMM4 = InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // XMM2 = F * Wa
+        PMULLW    XMM3, XMM4                 // XMM3 = B * InvWa
+        PADDW     XMM2, XMM3                 // XMM2 = Sum = F * Wa + B * InvWa
+        PADDW     XMM2, XMM1                 // + 128 (round)
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // XMM2 = Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2                 // Result color
+
+        // SSE2 version of PBLENDW XMM4, XMM6, $88
+        MOVDQA    XMM2, XMM6
+        PAND      XMM2, DQWORD PTR [SSE_AlphaMask_ALIGNED]
+        MOVDQA    XMM3, DQWORD PTR [SSE_AlphaMask_ALIGNED]
+        PANDN     XMM3, XMM4
+        POR       XMM2, XMM3                 // color from sum, alpha from Ra
+        MOVDQA    XMM4, XMM2
+
+        PACKUSWB  XMM4, XMM7
+
+        MOVQ      QWORD PTR [RDX], XMM4      // store 2 merged pixels
+        ADD       RCX, 8
+        ADD       RDX, 8
+        SUB       R8D, 2
+        CMP       R8D, 2
+        JGE       @Loop2
+
+@Tail:
+        CMP       R8D, 1
+        JL        @Exit
+        MOVD      XMM2, DWORD PTR [RCX]      // F (1 pixel)
+        MOVD      XMM3, DWORD PTR [RDX]      // B (1 pixel)
+        PUNPCKLBW XMM2, XMM7
+        PUNPCKLBW XMM3, XMM7
+
+        PSHUFLW   XMM4, XMM2, $FF            // Fa
+        PSHUFLW   XMM6, XMM3, $FF            // Ba
+
+        MOVDQA    XMM5, XMM0
+        PSUBW     XMM5, XMM4
+        PMULLW    XMM5, XMM6
+        PADDW     XMM5, XMM1
+        PMULHUW   XMM5, DQWORD PTR [SSE_01010101_ALIGNED]
+        MOVDQA    XMM6, XMM5
+        PADDW     XMM6, XMM4                 // Ra
+
+        PEXTRW    EAX, XMM6, 0
+        PEXTRW    R10D, XMM4, 0
+        SHL       EAX, 8
+        ADD       EAX, R10D
+        MOVZX     EAX, BYTE PTR [R9 + RAX]   // Wa
+
+        MOVD      XMM5, EAX
+        PSHUFLW   XMM5, XMM5, 0
+
+        // Result color: Round( (F * Wa + B * (255 - Wa)) / 255 )
+        MOVDQA    XMM4, XMM0
+        PSUBW     XMM4, XMM5                 // InvWa = 255 - Wa
+
+        PMULLW    XMM2, XMM5                 // F * Wa
+        PMULLW    XMM3, XMM4                 // B * InvWa
+        PADDW     XMM2, XMM3                 // Sum
+        PADDW     XMM2, XMM1                 // + 128
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]  // Round(Sum / 255)
+
+        MOVDQA    XMM4, XMM2
+
+        MOVDQA    XMM2, XMM6
+        PAND      XMM2, DQWORD PTR [SSE_AlphaMask_ALIGNED]
+        MOVDQA    XMM3, DQWORD PTR [SSE_AlphaMask_ALIGNED]
+        PANDN     XMM3, XMM4
+        POR       XMM2, XMM3
+        MOVDQA    XMM4, XMM2
+
+        PACKUSWB  XMM4, XMM7
+        MOVD      DWORD PTR [RDX], XMM4      // store 1 merged pixel
+@Exit:
+{$ifend}
+end;
+
+
+
+
+// 4 pixels per iteration
+// No lookup table
+// Wa:
+//
+//     Wa = round(Fa * 255 / Ra)
+//
+//     r = RCPPS(Ra)
+//     r = r * (2 - Ra*r)
+//     Wa = trunc(Fa * 255 * r + 0.5)
+//
+// Errors:
+// Tolerance 0: 16.8 %
+// Tolerance 1: 0.1 %
+procedure MergeLine_SSE41_Sanyin_2(Src, Dst: PColor32; Count: Integer);
+asm
+{$if defined(TARGET_x86)}
+  // EAX = Src
+  // EDX = Dst
+  // ECX = Count
+        CMP       ECX, 0
+        JLE       @Exit
+        CMP       ECX, 4
+        JGE       @Loop4
+        JMP       @PrepareRemainder
+
+// ============================================================================
+// COMMON 4-PIXEL LOOP
+// ============================================================================
+@Loop4:
+        MOVDQU    XMM2, OWORD PTR [EAX]       // Src 4 pixels
+        MOVDQU    XMM3, OWORD PTR [EDX]       // Dst 4 pixels
+
+// Main calc label
+@Calc4:
+
+        // Extract Fa
+        MOVDQA    XMM4, XMM2
+        PSHUFB    XMM4, DQWORD PTR [SSE_AlphaExtractMask_ALIGNED]
+        PMOVZXBW  XMM4, XMM4                    // Fa words
+
+        // Extract Ba
+        MOVDQA    XMM6, XMM3
+        PSHUFB    XMM6, DQWORD PTR [SSE_AlphaExtractMask_ALIGNED]
+        PMOVZXBW  XMM6, XMM6                    // Ba words
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQU    XMM7, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM7, XMM4
+        PMULLW    XMM7, XMM6
+        PADDW     XMM7, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM7, DQWORD PTR [SSE_01010101_ALIGNED]
+        PADDW     XMM7, XMM4                  // Ra words
+
+        // Prepare alphas 0,0,0,Ra0, 0,0,0,Ra1, 0,0,0,Ra2, 0,0,0,Ra3
+        MOVDQA    XMM6, XMM7
+        PSHUFB    XMM6, DQWORD PTR [SSE_RaToAlpha_Mask_ALIGNED]
+
+        // Fa and Ra to dwords
+        PMOVZXWD  XMM5, XMM4                  // Fa dword
+        PMOVZXWD  XMM7, XMM7                  // Ra dword
+
+        // Ra = max(Ra, 1)
+        PMAXUD    XMM7, DQWORD PTR [SSE_00000001_ALIGNED]
+
+        // Fast reciprocal (Newton-Raphson)
+        CVTDQ2PS  XMM7, XMM7
+        MOVAPS    XMM1, XMM7
+        RCPPS     XMM1, XMM1
+
+        // r = r * (2 - Ra * r)
+        MULPS     XMM7, XMM1
+        MOVAPS    XMM0, DQWORD PTR [SSE_FloatTwo_ALIGNED]
+        SUBPS     XMM0, XMM7
+        MULPS     XMM1, XMM0
+
+        // Wa = round(Fa * 255 / Ra)
+        CVTDQ2PS  XMM5, XMM5
+        MULPS     XMM5, DQWORD PTR [SSE_255f_ALIGNED]
+        MULPS     XMM5, XMM1
+
+        ADDPS     XMM5, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        CVTTPS2DQ XMM5, XMM5                  // Wa dword
+
+        // Extract Wa words  from the dwords
+        // XMM4 = Wa pixels 0-1
+        // XMM5 = Wa pixels 2-3
+        MOVDQA    XMM4, XMM5
+        PSHUFB    XMM4, DQWORD PTR [SSE_Wa01_Mask_ALIGNED]
+        PSHUFB    XMM5, DQWORD PTR [SSE_DwordsToWords_Mask_ALIGNED]
+
+        // PIXELS 0-1
+        PMOVZXBW  XMM0, XMM2                    // F low
+        PMOVZXBW  XMM1, XMM3                    // B low
+
+        // InvWa = 255 - Wa
+        MOVDQU    XMM7, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM7, XMM4
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM0, XMM4
+        PMULLW    XMM1, XMM7
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM0, XMM0
+
+        // Restore Ra into alpha byte
+        PAND      XMM0, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        POR       XMM0, XMM6
+
+        // PIXELS 2-3
+        PXOR      XMM7, XMM7
+        PUNPCKHBW XMM2, XMM7                    // F high
+        PUNPCKHBW XMM3, XMM7                    // B high
+
+        // InvWa
+        MOVDQU    XMM7, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM7, XMM5
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM2, XMM5
+        PMULLW    XMM3, XMM7
+
+        PADDW     XMM2, XMM3
+        PADDW     XMM2, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM2, XMM2
+
+        // Restore Ra into alpha byte
+        PAND      XMM2, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        PSRLDQ    XMM6, 8
+        POR       XMM2, XMM6
+        CMP       ECX, 4
+        JL        @StoreRemainder
+
+        MOVQ      QWORD PTR [EDX],     XMM0
+        MOVQ      QWORD PTR [EDX+8],   XMM2
+        ADD       EAX, 16
+        ADD       EDX, 16
+        SUB       ECX, 4
+
+        CMP       ECX, 4
+        JGE       @Loop4
+
+        TEST      ECX, ECX
+        JZ        @Exit
+        JMP       @PrepareRemainder
+
+// Remainder: 1..3 pixels
+@PrepareRemainder:
+        CMP       ECX, 3
+        JE        @Load3
+        CMP       ECX, 2
+        JE        @Load2
+
+@Load1:
+        MOVD      XMM2, DWORD PTR [EAX]
+        MOVD      XMM3, DWORD PTR [EDX]
+        JMP       @Calc4
+
+@Load2:
+        MOVQ      XMM2, QWORD PTR [EAX]
+        MOVQ      XMM3, QWORD PTR [EDX]
+        JMP       @Calc4
+
+@Load3:
+        MOVQ      XMM2, QWORD PTR [EAX]
+        MOVD      XMM4, DWORD PTR [EAX+8]
+        PUNPCKLQDQ XMM2, XMM4
+        MOVQ      XMM3, QWORD PTR [EDX]
+        MOVD      XMM4, DWORD PTR [EDX+8]
+        PUNPCKLQDQ XMM3, XMM4
+        JMP       @Calc4
+
+@StoreRemainder:
+        CMP       ECX, 3
+        JE        @Store3
+        CMP       ECX, 2
+        JE        @Store2
+
+@Store1:
+        MOVD      DWORD PTR [EDX], XMM0
+        JMP       @Exit
+
+@Store2:
+        MOVQ      QWORD PTR [EDX], XMM0
+        JMP       @Exit
+
+@Store3:
+        MOVQ      QWORD PTR [EDX], XMM0
+        MOVD      DWORD PTR [EDX+8], XMM2
+
+@Exit:
+{$elseif defined(TARGET_X64)}
+  // RCX = Src
+  // RDX = Dst
+  // R8D = Count
+
+        CMP       R8D, 0
+        JLE       @Exit
+
+        SUB       RSP, 32
+        MOVDQU    OWORD PTR [RSP],     XMM6
+        MOVDQU    OWORD PTR [RSP+16],  XMM7
+        CMP       R8D, 4
+        JGE       @Loop4
+        JMP       @PrepareRemainder
+
+@Loop4:
+        MOVDQU    XMM2, OWORD PTR [RCX]       // Src 4 pixels
+        MOVDQU    XMM3, OWORD PTR [RDX]       // Dst 4 pixels
+
+// Main calc label
+@Calc4:
+
+        // Extract Fa
+        MOVDQA    XMM4, XMM2
+        PSHUFB    XMM4, DQWORD PTR [SSE_AlphaExtractMask_ALIGNED]
+        PMOVZXBW  XMM4, XMM4                  // Fa words
+
+        // Extract Ba
+        MOVDQA    XMM6, XMM3
+        PSHUFB    XMM6, DQWORD PTR [SSE_AlphaExtractMask_ALIGNED]
+        PMOVZXBW  XMM6, XMM6                  // Ba WORDs
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQU    XMM7, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM7, XMM4
+        PMULLW    XMM7, XMM6
+        PADDW     XMM7, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM7, DQWORD PTR [SSE_01010101_ALIGNED]
+        PADDW     XMM7, XMM4                  // Ra words
+
+
+        // Prepare alphas 0,0,0,Ra0, 0,0,0,Ra1, 0,0,0,Ra2, 0,0,0,Ra3
+        MOVDQA    XMM6, XMM7
+        PSHUFB    XMM6, DQWORD PTR [SSE_RaToAlpha_Mask_ALIGNED]
+
+        // Fa and Ra to dwords
+        PMOVZXWD  XMM5, XMM4                  // Fa dword
+        PMOVZXWD  XMM7, XMM7                  // Ra dword
+
+        // Ra = max(Ra, 1)
+        PMAXUD    XMM7, DQWORD PTR [SSE_00000001_ALIGNED]
+
+        // Fast reciprocal (Newton-Raphson)
+        CVTDQ2PS  XMM7, XMM7
+        MOVAPS    XMM1, XMM7
+        RCPPS     XMM1, XMM1
+
+        // r = r * (2 - Ra * r)
+        MULPS     XMM7, XMM1
+        MOVAPS    XMM0, DQWORD PTR [SSE_FloatTwo_ALIGNED]
+        SUBPS     XMM0, XMM7
+        MULPS     XMM1, XMM0
+
+        // Wa = round(Fa * 255 / Ra)
+        CVTDQ2PS  XMM5, XMM5
+        MULPS     XMM5, DQWORD PTR [SSE_255f_ALIGNED]
+        MULPS     XMM5, XMM1
+
+        ADDPS     XMM5, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        CVTTPS2DQ XMM5, XMM5                  // Wa dword
+
+        // Extract Wa words  from the dwords
+        // XMM4 = Wa pixels 0-1
+        // XMM5 = Wa pixels 2-3
+        MOVDQA    XMM4, XMM5
+        PSHUFB    XMM4, DQWORD PTR [SSE_Wa01_Mask_ALIGNED]
+        PSHUFB    XMM5, DQWORD PTR [SSE_DwordsToWords_Mask_ALIGNED]
+
+        // PIXELS 0-1
+        PMOVZXBW  XMM0, XMM2                  // F low
+        PMOVZXBW  XMM1, XMM3                  // B low
+
+        // InvWa = 255 - Wa
+        MOVDQU    XMM7, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM7, XMM4
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM0, XMM4
+        PMULLW    XMM1, XMM7
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM0, XMM0
+
+        // Restore Ra into alpha byte
+        PAND      XMM0, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        POR       XMM0, XMM6
+
+        // PIXELS 2-3
+        PXOR      XMM7, XMM7
+        PUNPCKHBW XMM2, XMM7                  // F high
+        PUNPCKHBW XMM3, XMM7                  // B high
+
+        // InvWa
+        MOVDQU    XMM7, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM7, XMM5
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM2, XMM5
+        PMULLW    XMM3, XMM7
+
+        PADDW     XMM2, XMM3
+        PADDW     XMM2, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM2, XMM2
+
+        // Restore Ra into alpha byte
+        PAND      XMM2, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        PSRLDQ    XMM6, 8
+        POR       XMM2, XMM6
+        CMP       R8D, 4
+        JL        @StoreRemainder
+
+        MOVQ      QWORD PTR [RDX],     XMM0
+        MOVQ      QWORD PTR [RDX + 8],   XMM2
+
+        ADD       RCX, 16
+        ADD       RDX, 16
+        SUB       R8D, 4
+
+        CMP       R8D, 4
+        JGE       @Loop4
+
+        TEST      R8D, R8D
+        JZ        @Restore
+        JMP       @PrepareRemainder
+
+// Remainder: 1..3 pixels
+@PrepareRemainder:
+        CMP       R8D, 3
+        JE        @Load3
+        CMP       R8D, 2
+        JE        @Load2
+
+@Load1:
+        MOVD      XMM2, DWORD PTR [RCX]
+        MOVD      XMM3, DWORD PTR [RDX]
+        JMP       @Calc4
+
+@Load2:
+        MOVQ      XMM2, QWORD PTR [RCX]
+        MOVQ      XMM3, QWORD PTR [RDX]
+        JMP       @Calc4
+
+@Load3:
+        MOVQ      XMM2, QWORD PTR [RCX]
+        MOVD      XMM4, DWORD PTR [RCX + 8]
+        PUNPCKLQDQ XMM2, XMM4
+        MOVQ      XMM3, QWORD PTR [RDX]
+        MOVD      XMM4, DWORD PTR [RDX + 8]
+        PUNPCKLQDQ XMM3, XMM4
+        JMP       @Calc4
+
+@StoreRemainder:
+        CMP       R8D, 3
+        JE        @Store3
+        CMP       R8D, 2
+        JE        @Store2
+
+@Store1:
+        MOVD      DWORD PTR [RDX], XMM0
+        JMP       @Restore
+
+@Store2:
+        MOVQ      QWORD PTR [RDX], XMM0
+        JMP       @Restore
+
+@Store3:
+        MOVQ      QWORD PTR [RDX], XMM0
+        MOVD      DWORD PTR [RDX + 8], XMM2
+
+@Restore:
+        MOVDQU    XMM6, DQWORD PTR [RSP]
+        MOVDQU    XMM7, DQWORD PTR [RSP + 16]
+        ADD       RSP, 32
+
+@Exit:
+{$ifend}
+end;
+
+// 4 pixels per iteration
+// No lookup table
+// Wa:
+//
+//     Wa = round(Fa * 255 / Ra)
+//
+//     r = RCPPS(Ra)
+//     r = r * (2 - Ra*r)
+//     Wa = trunc(Fa * 255 * r + 0.5)
+//
+// Errors:
+// Tolerance 0: 16.8 %
+// Tolerance 1: 0.1 %
+procedure MergeLine_SSE2_Sanyin_2(Src, Dst: PColor32; Count: Integer);
+asm
+{$if defined(TARGET_x86)}
+  // EAX = Src
+  // EDX = Dst
+  // ECX = Count
+        CMP       ECX, 0
+        JLE       @Exit
+        CMP       ECX, 4
+        JGE       @Loop4
+        JMP       @PrepareRemainder
+
+// ============================================================================
+// COMMON 4-PIXEL LOOP
+// ============================================================================
+@Loop4:
+        MOVDQU    XMM2, OWORD PTR [EAX]       // Src 4 pixels
+        MOVDQU    XMM3, OWORD PTR [EDX]       // Dst 4 pixels
+
+// Main calc label
+@Calc4:
+
+        // Extract Fa, Ba (dword form, pure SSE2 shift)
+        MOVDQA    XMM4, XMM2
+        PSRLD     XMM4, 24                     // Fa dword
+
+        MOVDQA    XMM6, XMM3
+        PSRLD     XMM6, 24                     // Ba dword
+
+        // Pack down to words for the word-domain blend math
+        MOVDQA    XMM5, XMM4
+        PACKSSDW  XMM5, XMM5                   // Fa words
+        MOVDQA    XMM7, XMM6
+        PACKSSDW  XMM7, XMM7                   // Ba words
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQU    XMM0, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM0, XMM5
+        PMULLW    XMM0, XMM7
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PADDW     XMM0, XMM5                   // Ra words
+
+        // alpha restore 0,0,0,Ra0, 0,0,0,Ra1, 0,0,0,Ra2, 0,0,0,Ra3
+        PXOR      XMM6, XMM6
+        MOVDQA    XMM1, XMM0
+        PUNPCKLWD XMM1, XMM6                   // Ra dword
+        MOVDQA    XMM5, XMM1
+        PSLLD     XMM5, 24                     // alpha restore
+
+        // Ra = max(Ra, 1) - Ra is never negative, only Ra=0 needs fixing
+        PCMPEQD   XMM6, XMM1                   // mask = all-1s where Ra = 0
+        MOVDQA    XMM7, DQWORD PTR [SSE_00000001_ALIGNED]
+        PAND      XMM7, XMM6                   // 1 where Ra = 0, else 0
+        PANDN     XMM6, XMM1                   // Ra where Ra <> 0, else 0
+        POR       XMM6, XMM7                   // max(Ra, 1) dword
+
+        // Fast reciprocal (Newton-Raphson)
+        CVTDQ2PS  XMM6, XMM6
+        MOVAPS    XMM1, XMM6
+        RCPPS     XMM1, XMM1
+
+        // r = r * (2 - Ra * r)
+        MULPS     XMM6, XMM1
+        MOVAPS    XMM0, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        SUBPS     XMM0, XMM6
+        MULPS     XMM1, XMM0
+
+        // Wa = round(Fa * 255 / Ra)
+        CVTDQ2PS  XMM4, XMM4                   // Fa dword -> float
+        MULPS     XMM4, DQWORD PTR [SSE_255f_ALIGNED]
+        MULPS     XMM4, XMM1
+
+        ADDPS     XMM4, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        CVTTPS2DQ XMM4, XMM4                   // Wa dword
+
+        // Broadcast Wa dwords into per-pixel words
+        MOVDQA    XMM0, XMM4
+        PACKSSDW  XMM0, XMM0                   // words: Wa0,Wa1,Wa2,Wa3, Wa0,Wa1,Wa2,Wa3
+
+        MOVDQA    XMM6, XMM0
+        PSHUFLW   XMM6, XMM6, 0                // low4 = Wa0 x4
+        PSHUFHW   XMM6, XMM6, $55              // high4 = Wa1 x4  -> Wa01 = Wa0 x4, Wa1 x4
+
+        MOVDQA    XMM7, XMM0
+        PSHUFLW   XMM7, XMM7, $AA              // low4 = Wa2 x4
+        PSHUFHW   XMM7, XMM7, $FF              // high4 = Wa3 x4  -> Wa23 = Wa2 x4, Wa3 x4
+
+        // PIXELS 0-1
+        PXOR      XMM4, XMM4
+        MOVDQA    XMM0, XMM2
+        PUNPCKLBW XMM0, XMM4                   // F low
+        MOVDQA    XMM1, XMM3
+        PUNPCKLBW XMM1, XMM4                   // B low
+
+        // InvWa = 255 - Wa
+        MOVDQU    XMM4, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM4, XMM6
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM0, XMM6
+        PMULLW    XMM1, XMM4
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM0, XMM0
+
+        // Restore Ra into alpha byte
+        PAND      XMM0, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        POR       XMM0, XMM5
+
+        // PIXELS 2-3
+        PXOR      XMM4, XMM4
+        PUNPCKHBW XMM2, XMM4                   // F high
+        PUNPCKHBW XMM3, XMM4                   // B high
+
+        // InvWa
+        MOVDQU    XMM4, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM4, XMM7
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM2, XMM7
+        PMULLW    XMM3, XMM4
+
+        PADDW     XMM2, XMM3
+        PADDW     XMM2, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM2, XMM2
+
+        // Restore Ra into alpha byte
+        PAND      XMM2, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        PSRLDQ    XMM5, 8
+        POR       XMM2, XMM5
+        CMP       ECX, 4
+        JL        @StoreRemainder
+
+        MOVQ      QWORD PTR [EDX],     XMM0
+        MOVQ      QWORD PTR [EDX + 8],   XMM2
+        ADD       EAX, 16
+        ADD       EDX, 16
+        SUB       ECX, 4
+
+        CMP       ECX, 4
+        JGE       @Loop4
+
+        TEST      ECX, ECX
+        JZ        @Exit
+        JMP       @PrepareRemainder
+
+// Remainder: 1..3 pixels
+@PrepareRemainder:
+        CMP       ECX, 3
+        JE        @Load3
+        CMP       ECX, 2
+        JE        @Load2
+
+@Load1:
+        MOVD      XMM2, DWORD PTR [EAX]
+        MOVD      XMM3, DWORD PTR [EDX]
+        JMP       @Calc4
+
+@Load2:
+        MOVQ      XMM2, QWORD PTR [EAX]
+        MOVQ      XMM3, QWORD PTR [EDX]
+        JMP       @Calc4
+
+@Load3:
+        MOVQ      XMM2, QWORD PTR [EAX]
+        MOVD      XMM4, DWORD PTR [EAX + 8]
+        PUNPCKLQDQ XMM2, XMM4
+        MOVQ      XMM3, QWORD PTR [EDX]
+        MOVD      XMM4, DWORD PTR [EDX + 8]
+        PUNPCKLQDQ XMM3, XMM4
+        JMP       @Calc4
+
+@StoreRemainder:
+        CMP       ECX, 3
+        JE        @Store3
+        CMP       ECX, 2
+        JE        @Store2
+
+@Store1:
+        MOVD      DWORD PTR [EDX], XMM0
+        JMP       @Exit
+
+@Store2:
+        MOVQ      QWORD PTR [EDX], XMM0
+        JMP       @Exit
+
+@Store3:
+        MOVQ      QWORD PTR [EDX], XMM0
+        MOVD      DWORD PTR [EDX+8], XMM2
+
+@Exit:
+{$elseif defined(TARGET_X64)}
+  // RCX = Src
+  // RDX = Dst
+  // R8D = Count
+
+        CMP       R8D, 0
+        JLE       @Exit
+
+        SUB       RSP, 32
+        MOVDQU    OWORD PTR [RSP],     XMM6
+        MOVDQU    OWORD PTR [RSP+16],  XMM7
+        CMP       R8D, 4
+        JGE       @Loop4
+        JMP       @PrepareRemainder
+
+@Loop4:
+        MOVDQU    XMM2, OWORD PTR [RCX]       // Src 4 pixels
+        MOVDQU    XMM3, OWORD PTR [RDX]       // Dst 4 pixels
+
+// Main calc label
+@Calc4:
+
+        // Extract Fa, Ba
+        MOVDQA    XMM4, XMM2
+        PSRLD     XMM4, 24                     // Fa dword
+
+        MOVDQA    XMM6, XMM3
+        PSRLD     XMM6, 24                     // Ba dword
+
+        // Pack down to words
+        MOVDQA    XMM5, XMM4
+        PACKSSDW  XMM5, XMM5                   // Fa words
+        MOVDQA    XMM7, XMM6
+        PACKSSDW  XMM7, XMM7                   // Ba words
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVDQU    XMM0, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM0, XMM5
+        PMULLW    XMM0, XMM7
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+        PADDW     XMM0, XMM5                   // Ra words
+
+        // alpha restore 0,0,0,Ra0, 0,0,0,Ra1, 0,0,0,Ra2, 0,0,0,Ra3
+        PXOR      XMM6, XMM6
+        MOVDQA    XMM1, XMM0
+        PUNPCKLWD XMM1, XMM6                   // Ra dword
+        MOVDQA    XMM5, XMM1
+        PSLLD     XMM5, 24                     // alpha restore
+
+        // Ra = max(Ra, 1)
+        PCMPEQD   XMM6, XMM1                   // mask = all 1s where Ra = 0
+        MOVDQA    XMM7, DQWORD PTR [SSE_00000001_ALIGNED]
+        PAND      XMM7, XMM6                   // 1 where Ra = 0, else 0
+        PANDN     XMM6, XMM1                   // Ra where Ra <> 0, else 0
+        POR       XMM6, XMM7                   // max(Ra, 1) dword
+
+        // Fast reciprocal (Newton-Raphson)
+        CVTDQ2PS  XMM6, XMM6
+        MOVAPS    XMM1, XMM6
+        RCPPS     XMM1, XMM1
+
+        // r = r * (2 - Ra * r)
+        MULPS     XMM6, XMM1
+        MOVAPS    XMM0, DQWORD PTR [SSE_FloatTwo_ALIGNED]
+        SUBPS     XMM0, XMM6
+        MULPS     XMM1, XMM0
+
+        // Wa = round(Fa * 255 / Ra)
+        CVTDQ2PS  XMM4, XMM4                   // Fa dword -> float
+        MULPS     XMM4, DQWORD PTR [SSE_255f_ALIGNED]
+        MULPS     XMM4, XMM1
+
+        ADDPS     XMM4, DQWORD PTR [SSE_FloatHalf_ALIGNED]
+        CVTTPS2DQ XMM4, XMM4                   // Wa dword
+
+        // Broadcast Wa dword
+        MOVDQA    XMM0, XMM4
+        PACKSSDW  XMM0, XMM0                   // words: Wa0,Wa1,Wa2,Wa3, Wa0,Wa1,Wa2,Wa3
+
+        MOVDQA    XMM6, XMM0
+        PSHUFLW   XMM6, XMM6, 0                // low4 = Wa0 x4
+        PSHUFHW   XMM6, XMM6, $55              // high4 = Wa1 x4  -> Wa01 = Wa0 x4, Wa1 x4
+
+        MOVDQA    XMM7, XMM0
+        PSHUFLW   XMM7, XMM7, $AA              // low4 = Wa2 x4
+        PSHUFHW   XMM7, XMM7, $FF              // high4 = Wa3 x4  -> Wa23 = Wa2 x4, Wa3 x4
+
+        // PIXELS 0-1
+        PXOR      XMM4, XMM4
+        MOVDQA    XMM0, XMM2
+        PUNPCKLBW XMM0, XMM4                   // F low
+        MOVDQA    XMM1, XMM3
+        PUNPCKLBW XMM1, XMM4                   // B low
+
+        // InvWa = 255 - Wa
+        MOVDQU    XMM4, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM4, XMM6
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM0, XMM6
+        PMULLW    XMM1, XMM4
+        PADDW     XMM0, XMM1
+        PADDW     XMM0, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM0, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM0, XMM0
+
+        // Restore Ra into alpha byte
+        PAND      XMM0, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        POR       XMM0, XMM5
+
+        // PIXELS 2-3
+        PXOR      XMM4, XMM4
+        PUNPCKHBW XMM2, XMM4                   // F high
+        PUNPCKHBW XMM3, XMM4                   // B high
+
+        // InvWa
+        MOVDQU    XMM4, DQWORD PTR [SSE_00FF00FF_ALIGNED]
+        PSUBW     XMM4, XMM7
+
+        // F * Wa + B * (255 - Wa)
+        PMULLW    XMM2, XMM7
+        PMULLW    XMM3, XMM4
+
+        PADDW     XMM2, XMM3
+        PADDW     XMM2, DQWORD PTR [SSE_00800080_ALIGNED]
+        PMULHUW   XMM2, DQWORD PTR [SSE_01010101_ALIGNED]
+
+        // Word to byte
+        PACKUSWB  XMM2, XMM2
+
+        // Restore Ra into alpha byte
+        PAND      XMM2, DQWORD PTR [SSE_AlphaClearMask_ALIGNED]
+        PSRLDQ    XMM5, 8
+        POR       XMM2, XMM5
+        CMP       R8D, 4
+        JL        @StoreRemainder
+
+        MOVQ      QWORD PTR [RDX],     XMM0
+        MOVQ      QWORD PTR [RDX + 8],   XMM2
+
+        ADD       RCX, 16
+        ADD       RDX, 16
+        SUB       R8D, 4
+
+        CMP       R8D, 4
+        JGE       @Loop4
+
+        TEST      R8D, R8D
+        JZ        @Restore
+        JMP       @PrepareRemainder
+
+// Remainder: 1..3 pixels
+@PrepareRemainder:
+        CMP       R8D, 3
+        JE        @Load3
+        CMP       R8D, 2
+        JE        @Load2
+
+@Load1:
+        MOVD      XMM2, DWORD PTR [RCX]
+        MOVD      XMM3, DWORD PTR [RDX]
+        JMP       @Calc4
+
+@Load2:
+        MOVQ      XMM2, QWORD PTR [RCX]
+        MOVQ      XMM3, QWORD PTR [RDX]
+        JMP       @Calc4
+
+@Load3:
+        MOVQ      XMM2, QWORD PTR [RCX]
+        MOVD      XMM4, DWORD PTR [RCX + 8]
+        PUNPCKLQDQ XMM2, XMM4
+        MOVQ      XMM3, QWORD PTR [RDX]
+        MOVD      XMM4, DWORD PTR [RDX + 8]
+        PUNPCKLQDQ XMM3, XMM4
+        JMP       @Calc4
+
+@StoreRemainder:
+        CMP       R8D, 3
+        JE        @Store3
+        CMP       R8D, 2
+        JE        @Store2
+
+@Store1:
+        MOVD      DWORD PTR [RDX], XMM0
+        JMP       @Restore
+
+@Store2:
+        MOVQ      QWORD PTR [RDX], XMM0
+        JMP       @Restore
+
+@Store3:
+        MOVQ      QWORD PTR [RDX], XMM0
+        MOVD      DWORD PTR [RDX + 8], XMM2
+
+@Restore:
+        MOVDQU    XMM6, DQWORD PTR [RSP]
+        MOVDQU    XMM7, DQWORD PTR [RSP + 16]
+        ADD       RSP, 32
+
+@Exit:
+{$ifend}
+end;
+
+  // Wallace:
+  //
+  //   Ra = Fa + Ba * (255 - Fa) / 255
+  //
+  //   Rc = Bc + Fa * (Fc - Bc) / Ra
+  //
+  // 4 pixels per iteration.
+  //
+  // Errors:
+  // Tolerance 0: 0.02 %
+  // Tolerance 1: 0 %
+procedure MergeLine_SSE41_Float_Sanyin(Src, Dst: PColor32; Count: Integer);{$IFDEF FPC} assembler; {$IFDEF TARGET_X64}nostackframe;{$ENDIF} {$ENDIF}
+asm
+{$if defined(TARGET_x86)}
+  // EAX = Src
+  // EDX = Dst
+  // ECX = Count
+  // XMM6 = Fa
+  // XMM7 = Ra
+  // XMM0/XMM1 = Src/Dst R
+  // XMM2/XMM3 = Src/Dst G
+  // XMM4/XMM5 = Src/Dst B
+        TEST      ECX, ECX
+        JLE       @Exit
+
+        PUSH      ESI
+        PUSH      EDI
+        PUSH      EBX
+        MOV       ESI, EAX
+        MOV       EDI, EDX
+        MOV       EBX, ECX
+
+        // EBX <- Count div 4
+        // EDX <- Count mod 4
+        MOV       EDX, EBX
+        AND       EDX, 3
+        SHR       EBX, 2
+
+        TEST      EBX, EBX
+        JZ        @CheckRemainder
+
+@Loop4:
+        MOVDQU    XMM0, [ESI]           // Load Src
+        // XMM6 = $FF000000 each DWORD
+        MOVDQA    XMM6, DQWORD PTR [SSE_ALPHA_MASK_ALIGNED]
+
+        // Source alpha = 0?
+        PTEST     XMM0, XMM6
+        JZ        @Next4
+        JC        @Opaque4
+
+        MOVDQU    XMM1, [EDI]
+
+        // Fa
+        // XMM6 = Fa0 Fa1 Fa2 Fa3
+        MOVDQA    XMM6, XMM0            // Extract alphas
+        PSRLD     XMM6, 24
+        CVTDQ2PS  XMM6, XMM6
+
+        // Ba
+        // XMM7 = Ba0 Ba1 Ba2 Ba3
+        MOVDQA    XMM7, XMM1            // Extract alphas
+        PSRLD     XMM7, 24
+        CVTDQ2PS  XMM7, XMM7
+
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        // XMM2 = Ba * (255 - Fa) / 255
+        // XMM7 = Ra
+        MOVDQA    XMM2, DQWORD PTR [SSE_255f_ALIGNED]
+        SUBPS     XMM2, XMM6
+        MULPS     XMM2, XMM7
+        MULPS     XMM2, DQWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+        MOVAPS    XMM7, XMM6
+        ADDPS     XMM7, XMM2            // Ra = Fa + T
+
+
+        // Save Ra, before clamp
+        MOVAPS    XMM2, XMM7
+        //ADDPS     XMM2, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM2, XMM2
+        CVTPS2DQ XMM2, XMM2
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]  // To low XMM dword
+        MOVD      EAX, XMM2             // save Ra to EAX
+        // Clamp Max(Ra, 1) to prevent div by zero
+        MAXPS     XMM7, DQWORD PTR [SSE_FloatOne_ALIGNED]
+
+//        // calc reciprocal (slower!)
+//        MOVAPS    XMM2, DQWORD PTR [SSE_ONE_PS_ALIGNED]
+//        DIVPS     XMM2, XMM7                              // XMM1 <- 1 / Ra
+//        MOVAPS    XMM7, XMM2
+
+        // Red
+        // Rc = Bc + Fa * (Fc - Bc) / Ra
+        //MOVDQU    XMM0, [ESI]         // Already loaded!
+        PSLLD     XMM0, 8
+        PSRLD     XMM0, 24
+        CVTDQ2PS  XMM0, XMM0            // Convert to float
+
+        //MOVDQU    XMM1, [EDI]         // Already loaded!
+        PSLLD     XMM1, 8
+        PSRLD     XMM1, 24
+        CVTDQ2PS  XMM1, XMM1            // Convert to float
+
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM6
+        DIVPS     XMM0, XMM7 // MULPS     XMM0, XMM7  // reciprocal (slower)
+        ADDPS     XMM0, XMM1
+
+        //ADDPS     XMM0, DQWORD PTR [SSE_HALF_PS_ALIGNED]    // for trunc, slower
+        //CVTTPS2DQ XMM0, XMM0                                // trunc
+        CVTPS2DQ XMM0, XMM0             // Round, faster, but depends on MXCSR
+
+        // 000000AA 000000BB 000000CC 000000DD -> 00000000 00000000 00000000 AABBCCDD
+        // (Reuse SSE_PSHUFB_B4_BYTE_MASK, nothing to do with blue channel)
+        PSHUFB    XMM0, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]
+
+        // Green
+        MOVDQU    XMM2, [ESI]
+        PSLLD     XMM2, 16
+        PSRLD     XMM2, 24
+        CVTDQ2PS  XMM2, XMM2
+        MOVDQU    XMM3, [EDI]
+        PSLLD     XMM3, 16
+        PSRLD     XMM3, 24
+        CVTDQ2PS  XMM3, XMM3
+        SUBPS     XMM2, XMM3
+        MULPS     XMM2, XMM6
+        DIVPS     XMM2, XMM7 //MULPS     XMM2, XMM7
+        ADDPS     XMM2, XMM3
+        //ADDPS     XMM2, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM2, XMM2
+        CVTPS2DQ XMM2, XMM2
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]
+
+        // Blue
+        MOVDQU    XMM4, [ESI]
+        PSLLD     XMM4, 24
+        PSRLD     XMM4, 24
+        CVTDQ2PS  XMM4, XMM4
+        MOVDQU    XMM5, [EDI]
+        PSLLD     XMM5, 24
+        PSRLD     XMM5, 24
+        CVTDQ2PS  XMM5, XMM5
+        SUBPS     XMM4, XMM5
+        MULPS     XMM4, XMM6
+        DIVPS     XMM4, XMM7 //MULPS     XMM4, XMM7
+        ADDPS     XMM4, XMM5
+        //ADDPS     XMM4, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM4, XMM4
+        CVTPS2DQ XMM4, XMM4
+        PSHUFB    XMM4, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]
+
+        // Reload Alpha (saved earlier)
+        MOVD      XMM7, EAX
+        // XMM0 = R0 R1 R2 R3
+        // XMM2 = G0 G1 G2 G3
+        // XMM4 = B0 B1 B2 B3
+        // XMM7 = A0 A1 A2 A3
+        PUNPCKLBW XMM4, XMM2
+        PUNPCKLBW XMM0, XMM7
+        PUNPCKLWD XMM4, XMM0
+
+        MOVDQU    [EDI], XMM4
+        JMP       @Next4
+
+@Opaque4:
+        // Src alpha is 255 for all 4 pixels
+        MOVDQU    [EDI], XMM0
+
+@Next4:
+        ADD       ESI, 16
+        ADD       EDI, 16
+        DEC       EBX
+        JNZ       @Loop4
+
+        // Remainder: 1..3 pixels
+@CheckRemainder:
+        TEST      EDX, EDX
+        JZ        @Done
+
+@Loop1:
+        MOV       EAX, [ESI]
+        MOV       ECX, [EDI]
+
+        // Src alpha
+        MOV       EBX, EAX
+        SHR       EBX, 24
+
+        // alpha = 0 -> preserve destination
+        TEST      EBX, EBX
+        JZ        @Next1
+
+        // alpha = 255 -> copy source
+        CMP       EBX, 255
+        JE        @Opaque1
+
+        // Fa
+        CVTSI2SS  XMM6, EBX
+
+        // Ba
+        MOV       EBX, ECX
+        SHR       EBX, 24
+        CVTSI2SS  XMM7, EBX
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM2, DWORD PTR [SSE_255f_ALIGNED]
+        SUBSS     XMM2, XMM6
+        MULSS     XMM2, XMM7
+        MULSS     XMM2, DWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+
+        // Ra = Fa + T
+        MOVSS     XMM7, XMM6
+        ADDSS     XMM7, XMM2
+        MOVSS     XMM2, XMM7
+        MAXSS     XMM2, DWORD PTR [SSE_FloatOne_ALIGNED]
+        MOVSS     XMM3, DWORD PTR [SSE_FloatOne_ALIGNED]
+        DIVSS     XMM3, XMM2
+        MOVSS     XMM2, XMM3          // XMM2 <- 1.0 / Ra
+
+        // Blue
+        MOVZX     EBX, BYTE PTR [ESI]
+        MOVZX     EAX, BYTE PTR [EDI]
+        CVTSI2SS  XMM0, EBX
+        CVTSI2SS  XMM1, EAX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // DIVSS     XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EBX, XMM0
+        CVTSS2SI EBX, XMM0
+
+        // Green
+        MOVZX     EAX, BYTE PTR [ESI + 1]
+        MOVZX     ECX, BYTE PTR [EDI + 1]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, ECX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // DIVSS     XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 8
+        OR        EBX, EAX
+
+        // Red
+        MOVZX     EAX, BYTE PTR [ESI + 2]
+        MOVZX     ECX, BYTE PTR [EDI + 2]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, ECX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // DIVSS     XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 16
+        OR        EBX, EAX
+
+        // Alpha
+        //ADDSS     XMM7, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM7
+        CVTSS2SI EAX, XMM7
+        SHL       EAX, 24
+        OR        EBX, EAX
+        MOV       [EDI], EBX
+        JMP       @Next1
+
+@Opaque1:
+        MOV       [EDI], EAX
+
+@Next1:
+        ADD       ESI, 4
+        ADD       EDI, 4
+        DEC       EDX
+        JNZ       @Loop1
+
+@Done:
+        POP       EBX
+        POP       EDI
+        POP       ESI
+
+@Exit:
+{$elseif defined(TARGET_x64)}
+  // RCX  = Src
+  // RDX  = Dst
+  // R8D  = Count
+
+        TEST      R8D, R8D
+        JLE       @Exit
+
+        SUB       RSP, 96
+        MOVDQU    [RSP], XMM6
+        MOVDQU    [RSP + 16], XMM7
+        MOVDQU    [RSP + 32], XMM8
+        MOVDQU    [RSP + 48], XMM9
+        MOVDQU    [RSP + 64], XMM10
+        MOVDQU    [RSP + 80], XMM11
+          //.SAVENV XMM6
+          //.SAVENV XMM7
+          //.SAVENV XMM8
+          //.SAVENV XMM9
+          //.SAVENV XMM10
+          //.SAVENV XMM11
+
+        // R8D <- Count div 4, R9D <- Count mod 4
+        MOV       R9D, R8D
+        AND       R9D, 3
+        SHR       R8D, 2
+
+        TEST      R8D, R8D
+        JZ        @CheckRemainder
+
+        // XMM9 = $FF000000 each dword
+        MOVDQA XMM9, DQWORD PTR [SSE_ALPHA_MASK_ALIGNED]
+
+@Loop4:
+        // Load Src
+        MOVDQU    XMM0, [RCX]
+        MOVDQA    XMM10, XMM0
+
+        // Source alpha = 0?
+        PTEST     XMM0, XMM9
+        JZ        @Next4
+        JC        @Opaque4
+
+        MOVDQU    XMM1, [RDX]
+        MOVDQA    XMM11, XMM1
+
+        // Fa
+        // XMM6 = Fa0 Fa1 Fa2 Fa3
+        MOVDQA    XMM6, XMM0            // Extract alphas
+        PSRLD     XMM6, 24
+        CVTDQ2PS  XMM6, XMM6
+
+        // Ba
+        // XMM7 = Ba0 Ba1 Ba2 Ba3
+        MOVDQA    XMM7, XMM1            // Extract alphas
+        PSRLD     XMM7, 24
+        CVTDQ2PS  XMM7, XMM7
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        // XMM2 =  Ba * (255 - Fa) / 255
+        // XMM7 = Ra
+        MOVDQA    XMM2, DQWORD PTR [SSE_255f_ALIGNED]
+        SUBPS     XMM2, XMM6
+        MULPS     XMM2, XMM7
+        MULPS     XMM2, DQWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+        MOVAPS    XMM7, XMM6
+        ADDPS     XMM7, XMM2            // Ra = Fa + T
+
+        // Save Ra, before clamp
+        MOVAPS    XMM1, XMM7
+        //ADDPS     XMM1, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM1, XMM1
+        CVTPS2DQ XMM1, XMM1
+        PSHUFB    XMM1, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]
+        MOVAPS    XMM8, XMM1            // XMM8 <- Ra
+        // Clamp Max(Ra, 1) to prevent div by zero
+        MAXPS     XMM7, DQWORD PTR [SSE_FloatOne_ALIGNED]
+
+        // calc reciprocal
+//        MOVAPS    XMM1, DQWORD PTR [SSE_ONE_PS_ALIGNED]
+//        DIVPS     XMM1, XMM7                              // XMM1 <- 1 / Ra
+//        MOVAPS    XMM7, XMM1
+
+        // Red
+        // Rc = Bc + Fa * (Fc - Bc) / Ra
+        //MOVDQU    XMM0, [RCX]         // Already loaded!
+        PSLLD     XMM0, 8
+        PSRLD     XMM0, 24
+        CVTDQ2PS  XMM0, XMM0            // Convert to float
+        //MOVDQU    XMM1, [RDX]         // Already loaded!
+        MOVDQA    XMM1, XMM11
+        PSLLD     XMM1, 8
+        PSRLD     XMM1, 24
+        CVTDQ2PS  XMM1, XMM1            // Convert to float
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM6
+        DIVPS     XMM0, XMM7 // MULPS     XMM0, XMM7                  // multiply by reciprocal, instead of DIVPS     XMM0, XMM7
+        ADDPS     XMM0, XMM1
+        //ADDPS     XMM0, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM0, XMM0
+        CVTPS2DQ XMM0, XMM0
+        // 000000AA 000000BB 000000CC 000000DD -> 00000000 00000000 00000000 AABBCCDD
+        // (Reuse SSE_PSHUFB_B4_BYTE_MASK, nothing to do with blue channel)
+        PSHUFB    XMM0, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]
+
+
+        // Green
+        //MOVDQU    XMM2, [RCX]
+        MOVDQA    XMM2, XMM10           // Already in XMM10
+        PSLLD     XMM2, 16
+        PSRLD     XMM2, 24
+        CVTDQ2PS  XMM2, XMM2
+        //MOVDQU    XMM3, [RDX]
+        MOVDQA    XMM3, XMM11
+        PSLLD     XMM3, 16
+        PSRLD     XMM3, 24
+        CVTDQ2PS  XMM3, XMM3
+        SUBPS     XMM2, XMM3
+        MULPS     XMM2, XMM6
+        DIVPS     XMM2, XMM7 // MULPS     XMM2, XMM7                  // multiply by reciprocal, instead of DIVPS
+        ADDPS     XMM2, XMM3
+        //ADDPS     XMM2, DQWORD PTR [SSE_HALF_PS_ALIGNED]              // Add 0.5 before truncating
+        //CVTTPS2DQ XMM2, XMM2                                          // Truncate
+        CVTPS2DQ  XMM2, XMM2 // faster?
+        PSHUFB    XMM2, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]
+
+
+        // BLUE
+        //MOVDQU    XMM4, [RCX]
+        MOVDQA    XMM4, XMM10           // Already in XMM10
+        PSLLD     XMM4, 24
+        PSRLD     XMM4, 24
+        CVTDQ2PS  XMM4, XMM4
+        //MOVDQU    XMM5, [RDX]
+        MOVDQA    XMM5, XMM11           // Already in XMM11
+        PSLLD     XMM5, 24
+        PSRLD     XMM5, 24
+        CVTDQ2PS  XMM5, XMM5
+        SUBPS     XMM4, XMM5
+        MULPS     XMM4, XMM6
+        DIVPS     XMM4, XMM7 // MULPS     XMM4, XMM7                  // multiply by reciprocal, instead of DIVPS     XMM4, XMM7
+        ADDPS     XMM4, XMM5
+        //ADDPS     XMM4, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM4, XMM4
+        CVTPS2DQ XMM4, XMM4
+        PSHUFB    XMM4, DQWORD PTR [SSE_PSHUFB_B4_BYTE_MASK]
+        // Reload Alpha (saved earlier)
+        MOVAPS    XMM7, XMM8
+
+        // XMM0 = R0 R1 R2 R3
+        // XMM2 = G0 G1 G2 G3
+        // XMM4 = B0 B1 B2 B3
+        // XMM7 = A0 A1 A2 A3
+        PUNPCKLBW XMM4, XMM2
+        PUNPCKLBW XMM0, XMM7
+        PUNPCKLWD XMM4, XMM0
+
+        MOVDQU    [RDX], XMM4
+        JMP       @Next4
+
+@Opaque4:
+        // Src alpha = 255 for all 4 pixels.
+        MOVDQU    [RDX], XMM0
+
+@Next4:
+        ADD       RCX, 16
+        ADD       RDX, 16
+        DEC       R8D
+        JNZ       @Loop4
+
+  // Remainder: 1..3 pixels
+@CheckRemainder:
+        TEST      R9D, R9D
+        JZ        @Done
+
+@Loop1:
+        MOV       EAX, [RCX]
+        MOV       R8D, [RDX]
+
+        // Src alpha
+        MOV       R11D, EAX
+        SHR       R11D, 24
+
+        // Alpha = 0 -> preserve destination
+        TEST      R11D, R11D
+        JZ        @Next1
+
+        // Alpha = 255 -> copy source
+        CMP       R11D, 255
+        JE        @Opaque1
+
+        // Fa
+        CVTSI2SS  XMM6, R11D
+
+        // Ba
+        MOV       R11D, R8D
+        SHR       R11D, 24
+        CVTSI2SS  XMM7, R11D
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM2, DWORD PTR [SSE_255f_ALIGNED]
+        SUBSS     XMM2, XMM6
+        MULSS     XMM2, XMM7
+        MULSS     XMM2, DWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+
+        // Ra = Fa + T
+        MOVSS     XMM7, XMM6
+        ADDSS     XMM7, XMM2
+        MOVSS     XMM2, XMM7
+        MAXSS     XMM2, DWORD PTR [SSE_FloatOne_ALIGNED]
+        MOVSS     XMM3, DWORD PTR [SSE_FloatOne_ALIGNED]
+        DIVSS     XMM3, XMM2
+        MOVSS     XMM2, XMM3                  // XMM2 <- 1.0 / Ra
+
+        // Blue
+        MOVZX     R11D, BYTE PTR [RCX]
+        MOVZX     EAX, BYTE PTR [RDX]
+        CVTSI2SS  XMM0, R11D
+        CVTSI2SS  XMM1, EAX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // instead of DIVSS XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI R11D, XMM0
+        CVTSS2SI R11D, XMM0
+
+        // Green
+        MOVZX     EAX, BYTE PTR [RCX + 1]
+        MOVZX     R8D, BYTE PTR [RDX + 1]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, R8D
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // instead of DIVSS XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 8
+        OR        R11D, EAX
+
+        // Red
+        MOVZX     EAX, BYTE PTR [RCX + 2]
+        MOVZX     R8D, BYTE PTR [RDX + 2]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, R8D
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // instead of DIVSS XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 16
+        OR        R11D, EAX
+
+        // Alpha
+        //ADDSS     XMM7, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM7
+        CVTSS2SI EAX, XMM7
+        SHL       EAX, 24
+        OR        R11D, EAX
+        MOV       [RDX], R11D
+        JMP       @Next1
+
+@Opaque1:
+        MOV       [RDX], EAX
+
+@Next1:
+        ADD       RCX, 4
+        ADD       RDX, 4
+        DEC       R9D
+        JNZ       @Loop1
+
+@Done:
+        MOVDQU    XMM6, [RSP]
+        MOVDQU    XMM7, [RSP + 16]
+        MOVDQU    XMM8, [RSP + 32]
+        MOVDQU    XMM9, [RSP + 48]
+        MOVDQU    XMM10, [RSP + 64]
+        MOVDQU    XMM11, [RSP + 80]
+        ADD       RSP, 96
+
+@Exit:
+{$ifend}
+end;
+
+
+  // Wallace:
+  //
+  //   Ra = Fa + Ba * (255 - Fa) / 255
+  //
+  //   Rc = Bc + Fa * (Fc - Bc) / Ra
+  //
+  // 4 pixels per iteration.
+  //
+  // XMM6 = Fa
+  // XMM7 = Ra
+  // XMM0/XMM1 = Src/Dst R
+  // XMM2/XMM3 = Src/Dst G
+  // XMM4/XMM5 = Src/Dst B
+  //
+  // Errors:
+  // Tolerance 0: 0.02 %
+  // Tolerance 1: 0 %
+procedure MergeLine_SSE2_Float_Sanyin(Src, Dst: PColor32; Count: Integer);{$IFDEF FPC} assembler; {$IFDEF TARGET_X64}nostackframe;{$ENDIF} {$ENDIF}
+asm
+{$if defined(TARGET_x86)}
+  // EAX = Src
+  // EDX = Dst
+  // ECX = Count
+
+        TEST      ECX, ECX
+        JLE       @Exit
+
+        PUSH      ESI
+        PUSH      EDI
+        PUSH      EBX
+        MOV       ESI, EAX
+        MOV       EDI, EDX
+        MOV       EBX, ECX
+
+        // EBX <- Count div 4
+        // EDX <- Count mod 4
+        MOV       EDX, EBX
+        AND       EDX, 3
+        SHR       EBX, 2
+
+        TEST      EBX, EBX
+        JZ        @CheckRemainder
+
+@Loop4:
+        MOVDQU    XMM0, [ESI]           // Load Src
+        // XMM6 = $FF000000 each DWORD
+        MOVDQA    XMM6, DQWORD PTR [SSE_ALPHA_MASK_ALIGNED]
+
+        // Source alpha = 0?  (SSE2: PTEST emulated via PAND/PCMPEQD/PMOVMSKB)
+        MOVDQA    XMM1, XMM0
+        PAND      XMM1, XMM6            // XMM1 = masked alpha bits (per pixel)
+        PXOR      XMM2, XMM2
+        PCMPEQD   XMM2, XMM1            // FFFFFFFF per DWORD where alpha = 0
+        PMOVMSKB  EAX, XMM2
+        CMP       EAX, 0FFFFh
+        JE        @Next4                // all 4 alphas are zero -> keep Dst
+
+        PCMPEQD   XMM1, XMM6            // FFFFFFFF per DWORD where alpha = 255
+        PMOVMSKB  EAX, XMM1
+        CMP       EAX, 0FFFFh
+        JE        @Opaque4              // all 4 alphas are 255 -> copy Src
+
+        MOVDQU    XMM1, [EDI]
+
+        // Fa
+        // XMM6 = Fa0 Fa1 Fa2 Fa3
+        MOVDQA    XMM6, XMM0            // Extract alphas
+        PSRLD     XMM6, 24
+        CVTDQ2PS  XMM6, XMM6
+
+        // Ba
+        // XMM7 = Ba0 Ba1 Ba2 Ba3
+        MOVDQA    XMM7, XMM1            // Extract alphas
+        PSRLD     XMM7, 24
+        CVTDQ2PS  XMM7, XMM7
+
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        // XMM2 = Ba * (255 - Fa) / 255
+        // XMM7 = Ra
+        MOVDQA    XMM2, DQWORD PTR [SSE_255f_ALIGNED]
+        SUBPS     XMM2, XMM6
+        MULPS     XMM2, XMM7
+        MULPS     XMM2, DQWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+        MOVAPS    XMM7, XMM6
+        ADDPS     XMM7, XMM2            // Ra = Fa + T
+
+
+        // Save Ra, before clamp
+        MOVAPS    XMM2, XMM7
+        //ADDPS     XMM2, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM2, XMM2
+        CVTPS2DQ XMM2, XMM2
+        // 000000AA 000000BB 000000CC 000000DD -> 00000000 00000000 00000000 AABBCCDD
+        // (SSE2: PACKSSDW/PACKUSWB instead of PSHUFB)
+        PACKSSDW  XMM2, XMM2            // pack dwords -> words
+        PACKUSWB  XMM2, XMM2            // pack words -> bytes, low dword = packed result
+        MOVD      EAX, XMM2             // save Ra to EAX
+        // Clamp Max(Ra, 1) to prevent div by zero
+        MAXPS     XMM7, DQWORD PTR [SSE_FloatOne_ALIGNED]
+
+//        // calc reciprocal
+//        MOVAPS    XMM2, DQWORD PTR [SSE_ONE_PS_ALIGNED]
+//        DIVPS     XMM2, XMM7                              // XMM1 <- 1 / Ra
+//        MOVAPS    XMM7, XMM2
+
+        // Red
+        // Rc = Bc + Fa * (Fc - Bc) / Ra
+        //MOVDQU    XMM0, [ESI]         // Already loaded!
+        PSLLD     XMM0, 8
+        PSRLD     XMM0, 24
+        CVTDQ2PS  XMM0, XMM0            // Convert to float
+
+        //MOVDQU    XMM1, [EDI]         // Already loaded!
+        PSLLD     XMM1, 8
+        PSRLD     XMM1, 24
+        CVTDQ2PS  XMM1, XMM1            // Convert to float
+
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM6
+        DIVPS     XMM0, XMM7 // MULPS     XMM0, XMM7
+        ADDPS     XMM0, XMM1
+        //ADDPS     XMM0, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM0, XMM0
+        CVTPS2DQ XMM0, XMM0             // Round - instead of add 0.5, then trunc (CVTTPS2DQ)
+        // 000000AA 000000BB 000000CC 000000DD -> 00000000 00000000 00000000 AABBCCDD
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+
+        // Green
+        MOVDQU    XMM2, [ESI]
+        PSLLD     XMM2, 16
+        PSRLD     XMM2, 24
+        CVTDQ2PS  XMM2, XMM2
+        MOVDQU    XMM3, [EDI]
+        PSLLD     XMM3, 16
+        PSRLD     XMM3, 24
+        CVTDQ2PS  XMM3, XMM3
+        SUBPS     XMM2, XMM3
+        MULPS     XMM2, XMM6
+        DIVPS     XMM2, XMM7 //MULPS     XMM2, XMM7
+        ADDPS     XMM2, XMM3
+        //ADDPS     XMM2, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM2, XMM2
+        CVTPS2DQ XMM2, XMM2             // Round - instead of add 0.5, then trunc (CVTTPS2DQ)
+        PACKSSDW  XMM2, XMM2
+        PACKUSWB  XMM2, XMM2
+
+        // Blue
+        MOVDQU    XMM4, [ESI]
+        PSLLD     XMM4, 24
+        PSRLD     XMM4, 24
+        CVTDQ2PS  XMM4, XMM4
+        MOVDQU    XMM5, [EDI]
+        PSLLD     XMM5, 24
+        PSRLD     XMM5, 24
+        CVTDQ2PS  XMM5, XMM5
+        SUBPS     XMM4, XMM5
+        MULPS     XMM4, XMM6
+        DIVPS     XMM4, XMM7 //MULPS     XMM4, XMM7
+        ADDPS     XMM4, XMM5
+        //ADDPS     XMM4, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM4, XMM4
+        CVTPS2DQ XMM4, XMM4             // Round - instead of add 0.5, then trunc (CVTTPS2DQ)
+        PACKSSDW  XMM4, XMM4
+        PACKUSWB  XMM4, XMM4
+
+        // Reload Alpha (saved earlier)
+        MOVD      XMM7, EAX
+        // XMM0 = R0 R1 R2 R3
+        // XMM2 = G0 G1 G2 G3
+        // XMM4 = B0 B1 B2 B3
+        // XMM7 = A0 A1 A2 A3
+        PUNPCKLBW XMM4, XMM2
+        PUNPCKLBW XMM0, XMM7
+        PUNPCKLWD XMM4, XMM0
+
+        MOVDQU    [EDI], XMM4
+        JMP       @Next4
+
+@Opaque4:
+        // Src alpha is 255 for all 4 pixels
+        MOVDQU    [EDI], XMM0
+
+@Next4:
+        ADD       ESI, 16
+        ADD       EDI, 16
+        DEC       EBX
+        JNZ       @Loop4
+
+        // Remainder: 1..3 pixels
+@CheckRemainder:
+        TEST      EDX, EDX
+        JZ        @Done
+
+@Loop1:
+        MOV       EAX, [ESI]
+        MOV       ECX, [EDI]
+
+        // Src alpha
+        MOV       EBX, EAX
+        SHR       EBX, 24
+
+        // alpha = 0 -> preserve destination
+        TEST      EBX, EBX
+        JZ        @Next1
+
+        // alpha = 255 -> copy source
+        CMP       EBX, 255
+        JE        @Opaque1
+
+        // Fa
+        CVTSI2SS  XMM6, EBX
+
+        // Ba
+        MOV       EBX, ECX
+        SHR       EBX, 24
+        CVTSI2SS  XMM7, EBX
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM2, DWORD PTR [SSE_255f_ALIGNED]
+        SUBSS     XMM2, XMM6
+        MULSS     XMM2, XMM7
+        MULSS     XMM2, DWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+
+        // Ra = Fa + T
+        MOVSS     XMM7, XMM6
+        ADDSS     XMM7, XMM2
+        MOVSS     XMM2, XMM7
+        MAXSS     XMM2, DWORD PTR [SSE_FloatOne_ALIGNED]
+        MOVSS     XMM3, DWORD PTR [SSE_FloatOne_ALIGNED]
+        DIVSS     XMM3, XMM2
+        MOVSS     XMM2, XMM3          // XMM2 <- 1.0 / Ra
+
+        // Blue
+        MOVZX     EBX, BYTE PTR [ESI]
+        MOVZX     EAX, BYTE PTR [EDI]
+        CVTSI2SS  XMM0, EBX
+        CVTSI2SS  XMM1, EAX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // DIVSS     XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EBX, XMM0
+        CVTSS2SI EBX, XMM0
+
+        // Green
+        MOVZX     EAX, BYTE PTR [ESI + 1]
+        MOVZX     ECX, BYTE PTR [EDI + 1]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, ECX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // DIVSS     XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 8
+        OR        EBX, EAX
+
+        // Red
+        MOVZX     EAX, BYTE PTR [ESI + 2]
+        MOVZX     ECX, BYTE PTR [EDI + 2]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, ECX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // DIVSS     XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 16
+        OR        EBX, EAX
+
+        // Alpha
+        //ADDSS     XMM7, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM7
+        CVTSS2SI EAX, XMM7
+        SHL       EAX, 24
+        OR        EBX, EAX
+        MOV       [EDI], EBX
+        JMP       @Next1
+
+@Opaque1:
+        MOV       [EDI], EAX
+
+@Next1:
+        ADD       ESI, 4
+        ADD       EDI, 4
+        DEC       EDX
+        JNZ       @Loop1
+
+@Done:
+        POP       EBX
+        POP       EDI
+        POP       ESI
+
+@Exit:
+{$elseif defined(TARGET_x64)}
+  // RCX  = Src
+  // RDX  = Dst
+  // R8D  = Count
+
+        TEST      R8D, R8D
+        JLE       @Exit
+
+        SUB       RSP, 96
+        MOVDQU    [RSP], XMM6
+        MOVDQU    [RSP + 16], XMM7
+        MOVDQU    [RSP + 32], XMM8
+        MOVDQU    [RSP + 48], XMM9
+        MOVDQU    [RSP + 64], XMM10
+        MOVDQU    [RSP + 80], XMM11
+
+        // R8D <- Count div 4, R9D <- Count mod 4
+        MOV       R9D, R8D
+        AND       R9D, 3
+        SHR       R8D, 2
+
+        TEST      R8D, R8D
+        JZ        @CheckRemainder
+
+        // XMM9 = $FF000000 each dword
+        MOVDQA XMM9, DQWORD PTR [SSE_ALPHA_MASK_ALIGNED]
+
+@Loop4:
+        // Load Src
+        MOVDQU    XMM0, [RCX]
+        MOVDQA    XMM10, XMM0
+
+        // Source alpha = 0?  (SSE2: PTEST emulated via PAND/PCMPEQD/PMOVMSKB)
+        MOVDQA    XMM1, XMM0
+        PAND      XMM1, XMM9            // XMM1 = masked alpha bits (per pixel)
+        PXOR      XMM2, XMM2
+        PCMPEQD   XMM2, XMM1            // FFFFFFFF per DWORD where alpha = 0
+        PMOVMSKB  EAX, XMM2
+        CMP       EAX, 0FFFFh
+        JE        @Next4                // all 4 alphas are zero -> keep Dst
+
+        PCMPEQD   XMM1, XMM9            // FFFFFFFF per DWORD where alpha = 255
+        PMOVMSKB  EAX, XMM1
+        CMP       EAX, 0FFFFh
+        JE        @Opaque4              // all 4 alphas are 255 -> copy Src
+
+        MOVDQU    XMM1, [RDX]
+        MOVDQA    XMM11, XMM1
+
+        // Fa
+        // XMM6 = Fa0 Fa1 Fa2 Fa3
+        MOVDQA    XMM6, XMM0            // Extract alphas
+        PSRLD     XMM6, 24
+        CVTDQ2PS  XMM6, XMM6
+
+        // Ba
+        // XMM7 = Ba0 Ba1 Ba2 Ba3
+        MOVDQA    XMM7, XMM1            // Extract alphas
+        PSRLD     XMM7, 24
+        CVTDQ2PS  XMM7, XMM7
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        // XMM2 =  Ba * (255 - Fa) / 255
+        // XMM7 = Ra
+        MOVDQA    XMM2, DQWORD PTR [SSE_255f_ALIGNED]
+        SUBPS     XMM2, XMM6
+        MULPS     XMM2, XMM7
+        MULPS     XMM2, DQWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+        MOVAPS    XMM7, XMM6
+        ADDPS     XMM7, XMM2            // Ra = Fa + T
+
+        // Save Ra, before clamp
+        MOVAPS    XMM1, XMM7
+        //ADDPS     XMM1, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM1, XMM1
+        CVTPS2DQ XMM1, XMM1
+        // 000000AA 000000BB 000000CC 000000DD -> 00000000 00000000 00000000 AABBCCDD
+        // (SSE2: PACKSSDW/PACKUSWB instead of PSHUFB)
+        PACKSSDW  XMM1, XMM1
+        PACKUSWB  XMM1, XMM1
+        MOVAPS    XMM8, XMM1            // XMM8 <- Ra
+        // Clamp Max(Ra, 1) to prevent div by zero
+        MAXPS     XMM7, DQWORD PTR [SSE_FloatOne_ALIGNED]
+
+        // calc reciprocal
+//        MOVAPS    XMM1, DQWORD PTR [SSE_ONE_PS_ALIGNED]
+//        DIVPS     XMM1, XMM7                              // XMM1 <- 1 / Ra
+//        MOVAPS    XMM7, XMM1
+
+        // Red
+        // Rc = Bc + Fa * (Fc - Bc) / Ra
+        //MOVDQU    XMM0, [RCX]         // Already loaded!
+        PSLLD     XMM0, 8
+        PSRLD     XMM0, 24
+        CVTDQ2PS  XMM0, XMM0            // Convert to float
+        //MOVDQU    XMM1, [RDX]         // Already loaded!
+        MOVDQA    XMM1, XMM11
+        PSLLD     XMM1, 8
+        PSRLD     XMM1, 24
+        CVTDQ2PS  XMM1, XMM1            // Convert to float
+        SUBPS     XMM0, XMM1
+        MULPS     XMM0, XMM6
+        DIVPS     XMM0, XMM7 // MULPS     XMM0, XMM7                  // multiply by reciprocal, instead of DIVPS     XMM0, XMM7
+        ADDPS     XMM0, XMM1
+        //ADDPS     XMM0, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM0, XMM0
+        CVTPS2DQ XMM0, XMM0
+        // 000000AA 000000BB 000000CC 000000DD -> 00000000 00000000 00000000 AABBCCDD
+        // (SSE2: PACKSSDW/PACKUSWB instead of PSHUFB)
+        PACKSSDW  XMM0, XMM0
+        PACKUSWB  XMM0, XMM0
+
+
+        // Green
+        //MOVDQU    XMM2, [RCX]
+        MOVDQA    XMM2, XMM10           // Already in XMM10
+        PSLLD     XMM2, 16
+        PSRLD     XMM2, 24
+        CVTDQ2PS  XMM2, XMM2
+        //MOVDQU    XMM3, [RDX]
+        MOVDQA    XMM3, XMM11
+        PSLLD     XMM3, 16
+        PSRLD     XMM3, 24
+        CVTDQ2PS  XMM3, XMM3
+        SUBPS     XMM2, XMM3
+        MULPS     XMM2, XMM6
+        DIVPS     XMM2, XMM7 // MULPS     XMM2, XMM7                  // multiply by reciprocal, instead of DIVPS
+        ADDPS     XMM2, XMM3
+        //ADDPS     XMM2, DQWORD PTR [SSE_HALF_PS_ALIGNED]              // Add 0.5 before truncating
+        //CVTTPS2DQ XMM2, XMM2                                          // Truncate
+        CVTPS2DQ  XMM2, XMM2 // faster?
+        // (SSE2: PACKSSDW/PACKUSWB instead of PSHUFB)
+        PACKSSDW  XMM2, XMM2
+        PACKUSWB  XMM2, XMM2
+
+
+        // BLUE
+        //MOVDQU    XMM4, [RCX]
+        MOVDQA    XMM4, XMM10           // Already in XMM10
+        PSLLD     XMM4, 24
+        PSRLD     XMM4, 24
+        CVTDQ2PS  XMM4, XMM4
+        //MOVDQU    XMM5, [RDX]
+        MOVDQA    XMM5, XMM11           // Already in XMM11
+        PSLLD     XMM5, 24
+        PSRLD     XMM5, 24
+        CVTDQ2PS  XMM5, XMM5
+        SUBPS     XMM4, XMM5
+        MULPS     XMM4, XMM6
+        DIVPS     XMM4, XMM7 // MULPS     XMM4, XMM7                  // multiply by reciprocal, instead of DIVPS     XMM4, XMM7
+        ADDPS     XMM4, XMM5
+        //ADDPS     XMM4, DQWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTPS2DQ XMM4, XMM4
+        CVTPS2DQ XMM4, XMM4
+        // (SSE2: PACKSSDW/PACKUSWB instead of PSHUFB)
+        PACKSSDW  XMM4, XMM4
+        PACKUSWB  XMM4, XMM4
+        // Reload Alpha (saved earlier)
+        MOVAPS    XMM7, XMM8
+
+        // XMM0 = R0 R1 R2 R3
+        // XMM2 = G0 G1 G2 G3
+        // XMM4 = B0 B1 B2 B3
+        // XMM7 = A0 A1 A2 A3
+        PUNPCKLBW XMM4, XMM2
+        PUNPCKLBW XMM0, XMM7
+        PUNPCKLWD XMM4, XMM0
+
+        MOVDQU    [RDX], XMM4
+        JMP       @Next4
+
+@Opaque4:
+        // Src alpha = 255 for all 4 pixels.
+        MOVDQU    [RDX], XMM0
+
+@Next4:
+        ADD       RCX, 16
+        ADD       RDX, 16
+        DEC       R8D
+        JNZ       @Loop4
+
+  // Remainder: 1..3 pixels
+@CheckRemainder:
+        TEST      R9D, R9D
+        JZ        @Done
+
+@Loop1:
+        MOV       EAX, [RCX]
+        MOV       R8D, [RDX]
+
+        // Src alpha
+        MOV       R11D, EAX
+        SHR       R11D, 24
+
+        // Alpha = 0 -> preserve destination
+        TEST      R11D, R11D
+        JZ        @Next1
+
+        // Alpha = 255 -> copy source
+        CMP       R11D, 255
+        JE        @Opaque1
+
+        // Fa
+        CVTSI2SS  XMM6, R11D
+
+        // Ba
+        MOV       R11D, R8D
+        SHR       R11D, 24
+        CVTSI2SS  XMM7, R11D
+
+        // Ra = Fa + Ba * (255 - Fa) / 255
+        MOVSS     XMM2, DWORD PTR [SSE_255f_ALIGNED]
+        SUBSS     XMM2, XMM6
+        MULSS     XMM2, XMM7
+        MULSS     XMM2, DWORD PTR [SSE_INV255_FLOAT_ALIGNED]
+
+        // Ra = Fa + T
+        MOVSS     XMM7, XMM6
+        ADDSS     XMM7, XMM2
+        MOVSS     XMM2, XMM7
+        MAXSS     XMM2, DWORD PTR [SSE_FloatOne_ALIGNED]
+        MOVSS     XMM3, DWORD PTR [SSE_FloatOne_ALIGNED]
+        DIVSS     XMM3, XMM2
+        MOVSS     XMM2, XMM3                  // XMM2 <- 1.0 / Ra
+
+        // Blue
+        MOVZX     R11D, BYTE PTR [RCX]
+        MOVZX     EAX, BYTE PTR [RDX]
+        CVTSI2SS  XMM0, R11D
+        CVTSI2SS  XMM1, EAX
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // instead of DIVSS XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI R11D, XMM0
+        CVTSS2SI R11D, XMM0
+
+        // Green
+        MOVZX     EAX, BYTE PTR [RCX + 1]
+        MOVZX     R8D, BYTE PTR [RDX + 1]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, R8D
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // instead of DIVSS XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 8
+        OR        R11D, EAX
+
+        // Red
+        MOVZX     EAX, BYTE PTR [RCX + 2]
+        MOVZX     R8D, BYTE PTR [RDX + 2]
+        CVTSI2SS  XMM0, EAX
+        CVTSI2SS  XMM1, R8D
+        SUBSS     XMM0, XMM1
+        MULSS     XMM0, XMM6
+        MULSS     XMM0, XMM2                  // instead of DIVSS XMM0, XMM2
+        ADDSS     XMM0, XMM1
+        //ADDSS     XMM0, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM0
+        CVTSS2SI EAX, XMM0
+        SHL       EAX, 16
+        OR        R11D, EAX
+
+        // Alpha
+        //ADDSS     XMM7, DWORD PTR [SSE_HALF_PS_ALIGNED]
+        //CVTTSS2SI EAX, XMM7
+        CVTSS2SI EAX, XMM7
+        SHL       EAX, 24
+        OR        R11D, EAX
+        MOV       [RDX], R11D
+        JMP       @Next1
+
+@Opaque1:
+        MOV       [RDX], EAX
+
+@Next1:
+        ADD       RCX, 4
+        ADD       RDX, 4
+        DEC       R9D
+        JNZ       @Loop1
+
+@Done:
+        MOVDQU    XMM6, [RSP]
+        MOVDQU    XMM7, [RSP + 16]
+        MOVDQU    XMM8, [RSP + 32]
+        MOVDQU    XMM9, [RSP + 48]
+        MOVDQU    XMM10, [RSP + 64]
+        MOVDQU    XMM11, [RSP + 80]
+        ADD       RSP, 96
+
+@Exit:
+{$ifend}
+end;
 
 
 //------------------------------------------------------------------------------
@@ -4262,9 +8443,26 @@ begin
   BlendRegistry[@@MergeReg].Add(       @MergeReg_SSE2,          [isSSE2]).Name := 'MergeReg_SSE2';
 {$if not defined(FPC)}
   BlendRegistry[@@MergeReg].Add(       @MergeReg_SSE41,         [isSSE41]).Name := 'MergeReg_SSE41';
+  BlendRegistry[@@MergeReg].Add(       @MergeReg_SSE41_Sanyin,         [isSSE41]).Name := 'MergeReg_SSE41_Sanyin';
+  BlendRegistry[@@MergeReg].Add(       @MergeReg_SSE41_Float_Sanyin,   [isSSE41]).Name := 'MergeReg_SSE41_Float_Sanyin';
+  BlendRegistry[@@MergeReg].Add(       @MergeReg_SSE2_Sanyin,         [isSSE2]).Name := 'MergeReg_SSE2_Sanyin';
+  BlendRegistry[@@MergeReg].Add(       @MergeReg_SSE2_Float_Sanyin,         [isSSE2]).Name := 'MergeReg_SSE2_Float_Sanyin';
+
   BlendRegistry[@@MergeMem].Add(       @MergeMem_SSE41,         [isSSE41]).Name := 'MergeMem_SSE41';
+  BlendRegistry[@@MergeMem].Add(       @MergeMem_SSE41_Sanyin,  [isSSE41]).Name := 'MergeMem_SSE41_Sanyin';
+  BlendRegistry[@@MergeMem].Add(       @MergeMem_SSE41_Float_Sanyin,         [isSSE41]).Name := 'MergeMem_SSE41_Float_Sanyin';
+  BlendRegistry[@@MergeMem].Add(       @MergeMem_SSE2_Sanyin,  [isSSE2]).Name := 'MergeMem_SSE2_Sanyin';
+  BlendRegistry[@@MergeMem].Add(       @MergeMem_SSE2_Float_Sanyin,         [isSSE2]).Name := 'MergeMem_SSE2_Float_Sanyin';
+
   BlendRegistry[@@MergeLine].Add(      @MergeLine_SSE41,        [isSSE41]).Name := 'MergeLine_SSE41';
+  BlendRegistry[@@MergeLine].Add(      @MergeLine_SSE2_Sanyin,        [isSSE2]).Name := 'MergeLine_SSE2_Sanyin';
+  BlendRegistry[@@MergeLine].Add(      @MergeLine_SSE2_Sanyin_2,        [isSSE2]).Name := 'MergeLine_SSE2_Sanyin_2';
+  BlendRegistry[@@MergeLine].Add(      @MergeLine_SSE41_Sanyin,        [isSSE41]).Name := 'MergeLine_SSE41_Sanyin';
+  BlendRegistry[@@MergeLine].Add(      @MergeLine_SSE41_Sanyin_2,        [isSSE41]).Name := 'MergeLine_SSE41_Sanyin_2';
+
+  BlendRegistry[@@MergeLine].Add(      @MergeLine_SSE41_Float_Sanyin,        [isSSE41]).Name := 'MergeLine_SSE41_Float_Sanyin';
 {$ifend}
+  BlendRegistry[@@MergeLine].Add(      @MergeLine_SSE2_Float_Sanyin,        [isSSE2]).Name := 'MergeLine_SSE2_Float_Sanyin';
 
   BlendRegistry[@@CombineReg].Add(     @CombineReg_SSE2,        [isSSE2]).Name := 'CombineReg_SSE2';
   BlendRegistry[@@CombineMem].Add(     @CombineMem_SSE2_128,    [isSSE2]).Name := 'CombineMem_SSE2_128';
@@ -4277,14 +8475,19 @@ begin
   BlendRegistry[@@BlendReg].Add(       @BlendReg_SSE2,          [isSSE2]).Name := 'BlendReg_SSE2';
   BlendRegistry[@@BlendReg].Add(       @BlendReg_SSE41,         [isSSE41]).Name := 'BlendReg_SSE41';
   BlendRegistry[@@BlendMem].Add(       @BlendMem_SSE2,          [isSSE2]).Name := 'BlendMem_SSE2';
+  BlendRegistry[@@BlendMem].Add(       @BlendMem_SSE2_Sanyin,          [isSSE2]).Name := 'BlendMem_SSE2_Sanyin';
+  BlendRegistry[@@BlendMem].Add(       @BlendMem_SSE41_Sanyin,          [isSSE41]).Name := 'BlendMem_SSE41_Sanyin';
   BlendRegistry[@@BlendMems].Add(      @BlendMems_SSE2,         [isSSE2]).Name := 'BlendMems_SSE2';
   // TODO : BlendMemEx_SSE2 slower than Pascal version!
   // BlendRegistry[@@BlendMemEx].Add(     @BlendMemEx_SSE2,        [isSSE2]).Name := 'BlendMemEx_SSE2';
   BlendRegistry[@@BlendLine].Add(      @BlendLine_SSE2,         [isSSE2]).Name := 'BlendLine_SSE2';
+  BlendRegistry[@@BlendLine].Add(      @BlendLine_SSE2_Sanyin,  [isSSE2]).Name := 'BlendLine_SSE2_Sanyin';
 {$if not defined(FPC)}
   BlendRegistry[@@BlendLine].Add(      @BlendLine_SSE41,        [isSSE41]).Name := 'BlendLine_SSE41';
+  BlendRegistry[@@BlendLine].Add(      @BlendLine_SSE41_Sanyin, [isSSE41]).Name := 'BlendLine_SSE41_Sanyin';
 {$ifend}
   BlendRegistry[@@BlendLineEx].Add(    @BlendLineEx_SSE2,       [isSSE2]).Name := 'BlendLineEx_SSE2';
+
   BlendRegistry[@@BlendRegEx].Add(     @BlendRegEx_SSE2,        [isSSE2]).Name := 'BlendRegEx_SSE2';
   BlendRegistry[@@ColorMax].Add(       @ColorMax_SSE2,          [isSSE2]).Name := 'ColorMax_SSE2';
   BlendRegistry[@@ColorMin].Add(       @ColorMin_SSE2,          [isSSE2]).Name := 'ColorMin_SSE2';
